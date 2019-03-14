@@ -1,0 +1,385 @@
+@Library('pipeline-libs') _
+
+MAJOR_VERSION = '19.1.0'
+RELEASE_VERSION = "${MAJOR_VERSION}-b${env.BUILD_NUMBER}"
+RELEASE_VERSION_PATH = "$MAJOR_VERSION/b${env.BUILD_NUMBER}"
+
+AR_INSTALLER = "AgileREPORTER-${RELEASE_VERSION}.jar"
+AR_OFSAA_INSTALLER = "AgileREPORTER-OFSAA-${RELEASE_VERSION}.jar"
+INSTALLER_PATH = 'target/installer'
+AR_INSTALLER_PATH = "$INSTALLER_PATH/$AR_INSTALLER"
+AR_OFSAA_INSTALLER_PATH = "$INSTALLER_PATH/$AR_OFSAA_INSTALLER"
+
+AR_PROPERTIES = 'ocelot-bdd-env.properties'
+TEMPLATE_AR_PROPERTIES_PATH = "src/test/resources/template-$AR_PROPERTIES"
+AR_PROPERTIES_PATH = "target/$AR_PROPERTIES"
+
+AR_RELEASE_PATH = "/home/ec2-user/AgileREPORTER"
+AR_BACKUP_PATH = "/home/ec2-user/AgileREPORTER_old"
+
+BDD_ENV = 'bdd-env'
+
+JDK8_SETTINGS = [
+        options: [artifactsPublisher(disabled: true)],
+        maven  : 'mvn-3.3.9',
+        jdk    : 'OracleJDK8'
+]
+
+
+pipeline {
+    agent any
+
+    environment {
+        JAVA_HOME = tool 'OracleJDK8'
+        TEAMS_CHANNEL_URL = 'https://outlook.office.com/webhook/edee457e-63bc-4e9d-8eca-750bbaa3045c@4a78f2c0-297f-426d-b09f-5986924d38e7/JenkinsCI/d548703657364e68ac1e88c175de357f/b07b3f9f-454c-4bc8-b523-7b8a3fabf234'
+    }
+
+    stages {
+        stage('Setup') {
+            steps {
+                checkout scm
+            }
+        }
+        stage('Version') {
+            steps {
+                updatePomVersions()
+                updatePropertiesVersions()
+            }
+        }
+        stage('Installer') {
+            steps {
+                buildInstaller()
+                uploadInstallerToTempS3()
+            }
+        }
+        stage('Scan & Release') {
+            steps {
+                parallel(
+                        'SonarQube Analysis': {
+                            triggerSonarAnalysis()
+                        },
+                        'BDD Env Release': {
+                            releaseToBddEnv()
+                        }
+                )
+            }
+        }
+        stage('BDD Tests') {
+            steps {
+                executeBDDTests()
+            }
+        }
+        stage('Candidate Release') {
+            steps {
+                createS3CandidateRelease()
+
+                addBuildTagToRepo()
+            }
+        }
+        stage('Deploy to test') {
+            steps {
+                deployToM2()
+            }
+        }
+    }
+    post {
+        changed {
+            notifyFixed()
+        }
+        always {
+            script { buildMetric([ application : 'AGILE_REPORTER' ])}
+        }
+    }
+}
+
+def executeBDDTests(){
+    notifier.runAndNotifyOnFailure('failed the Analysis Module BDD Tests') {
+        build(
+                job: 'ocelot-bdd-pipeline',
+                parameters: [booleanParam(name: 'ANALYSIS_MODULE_ONLY', value: true)]
+        )
+    }
+}
+
+void updatePomVersions() {
+    notifier.runAndNotifyOnFailure('failed to update pom versions') {
+        echo "Update candidate release to version [$RELEASE_VERSION]"
+
+        withMaven(JDK8_SETTINGS) {
+            sh "mvn clean versions:set versions:commit -DnewVersion=$RELEASE_VERSION"
+        }
+    }
+}
+
+void updatePropertiesVersions() {
+
+    notifier.runAndNotifyOnFailure('failed to update properties versions') {
+        echo "Create install options file [$AR_PROPERTIES_PATH]"
+
+        def optionsPropertiesContent =
+                readFile(TEMPLATE_AR_PROPERTIES_PATH)
+                        .replaceAll("service.suffix.name=.*", "service.suffix.name=$RELEASE_VERSION")
+                        .replaceAll("external.version=.*", "external.version=$RELEASE_VERSION")
+                        .replaceAll("internal.version=.*", "internal.version=$RELEASE_VERSION")
+        writeFile(
+                file: AR_PROPERTIES_PATH,
+                text: optionsPropertiesContent
+        )
+        if (!fileExists(AR_PROPERTIES_PATH))
+            error "Cannot find install options file [$AR_PROPERTIES_PATH]"
+    }
+}
+
+void buildInstaller() {
+
+    notifier.runAndNotifyOnFailure('failed to create an installer') {
+
+        echo "Create Installer [$AR_INSTALLER]"
+
+        withMaven(JDK8_SETTINGS) {
+            sh "mvn verify"
+        }
+    }
+}
+
+void uploadInstallerToTempS3() {
+
+    notifier.runAndNotifyOnFailure('failed to upload an installer') {
+        echo "Upload artifacts to S3"
+
+        aws.s3Temp().agileReporter.upload(AR_INSTALLER_PATH, RELEASE_VERSION_PATH + "/" + AR_INSTALLER)
+        aws.s3Temp().agileReporter.upload(AR_PROPERTIES_PATH, RELEASE_VERSION_PATH + "/" + AR_PROPERTIES)
+    }
+
+}
+
+void triggerSonarAnalysis() {
+    echo "Start SonarQube Analysis"
+
+    notifier.runAndNotifyOnFailure('failed the SonarQube analysis') {
+        withMaven(JDK8_SETTINGS) {
+            sh "mvn sonar:sonar"
+        }
+    }
+}
+
+void releaseToBddEnv() {
+    echo "Release [$AR_INSTALLER] to [$BDD_ENV]"
+
+    notifier.runAndNotifyOnFailure("failed to release to BDD Env [$BDD_ENV]") {
+        node(BDD_ENV) {
+            removePreviousInstaller()
+
+            downloadInstallerFromTempS3()
+
+            uninstallCurrentArService()
+
+            installAR()
+
+            notifier.sendInfo("Deployed to $BDD_ENV")
+        }
+    }
+}
+
+void removePreviousInstaller() {
+    echo "Remove previous installer and backup"
+
+    sh "rm -rf *.jar *.properties"
+}
+
+void downloadInstallerFromTempS3() {
+    echo "Download artifacts from S3"
+
+	aws.s3Temp().agileReporter.download(RELEASE_VERSION_PATH + "/"+AR_INSTALLER ,AR_INSTALLER)
+	aws.s3Temp().agileReporter.download(RELEASE_VERSION_PATH + "/"+AR_PROPERTIES ,AR_PROPERTIES)
+
+}
+
+void uninstallCurrentArService() {
+    echo "Uninstall current AgileREPORTER service"
+
+    sh 'java -version'
+
+    sh "sudo $AR_RELEASE_PATH/bin/service.sh stop || true"
+    sh "sudo $AR_RELEASE_PATH/bin/service.sh uninstall || true"
+}
+
+void installAR() {
+    echo "Install AgileREPORTER from installer [$AR_INSTALLER]"
+
+    sh "sudo rm -rf $AR_RELEASE_PATH"
+    sh "java -jar $AR_INSTALLER -options $AR_PROPERTIES"
+    sh "sudo chmod +x -R $AR_RELEASE_PATH"
+
+    createBackup()
+
+    dir("$AR_RELEASE_PATH/bin") {
+        sh 'sudo ./service.sh install'
+        sh 'sudo ./service.sh start'
+
+        def statusOut = sh(script: 'sudo ./service.sh status', returnStdout: true)
+
+        def agileReporterServiceStatus = statusOut.split('\n').find {
+            it.contains('is running')
+        }
+        if (!agileReporterServiceStatus) {
+            error "AR Service did not start up. Status:\n $statusOut"
+        }
+    }
+}
+
+void createBackup() {
+    echo "Backup [$AR_RELEASE_PATH] to [$AR_BACKUP_PATH]"
+
+    sh "rm -rf $AR_BACKUP_PATH"
+
+    sh "cp -r $AR_RELEASE_PATH $AR_BACKUP_PATH"
+}
+
+void createS3CandidateRelease() {
+    echo "Upload candidate release to S3"
+
+    notifier.runAndNotifyOnFailure("failed to store the candidate release in s3 deploy") {
+		uploadInstaller()
+
+		def toolFileNames = uploadTools()
+
+		updateBuild(toolFileNames)
+    }
+}
+
+void uploadInstaller() {
+
+	aws.s3Deploy().agileReporter.upload(AR_INSTALLER_PATH, RELEASE_VERSION_PATH + "/"+AR_INSTALLER)
+	aws.s3Deploy().agileReporter.upload(AR_OFSAA_INSTALLER_PATH, RELEASE_VERSION_PATH + "/"+ AR_OFSAA_INSTALLER)
+}
+
+def uploadTools() {
+    def toolFileNames = findToolFileNames()
+
+    toolFileNames.each {
+        toolName ->
+		    aws.s3Deploy().agileReporter.upload(INSTALLER_PATH +"/"+toolName, RELEASE_VERSION_PATH + "/"+toolName)
+    }
+    return toolFileNames
+}
+
+def findToolFileNames() {
+    return sh(script: """ls -m -I "AgileREPORTER*" $INSTALLER_PATH""", returnStdout: true)
+            .split(',')
+            .collect { it.trim() }
+}
+
+void updateBuild(toolFileNames) {
+    def installerSection = createInstallerSection()
+    def toolsSection = createToolsSection(toolFileNames)
+    def componentsSection = createComponentsSection()
+
+    currentBuild.displayName = RELEASE_VERSION
+    currentBuild.description = """
+        $installerSection
+        $toolsSection
+        $componentsSection
+    """
+}
+
+def createInstallerSection() {
+    def installerWithVersion = "Installer $RELEASE_VERSION"
+    def downloadLink = aws.s3Deploy().agileReporter.createLink(RELEASE_VERSION_PATH + "/"+AR_INSTALLER ,installerWithVersion)
+
+    def installerWithVersionOFSAA = "OFSAA Installer $RELEASE_VERSION"
+    def downloandLinkOFSAA = aws.s3Deploy().agileReporter.createLink(RELEASE_VERSION_PATH + "/"+AR_OFSAA_INSTALLER ,installerWithVersionOFSAA)
+
+    return """
+                <h4 style='margin: 3px 0'>$downloadLink</h4>
+                <h4 style='margin: 3px 0'>$downloandLinkOFSAA</h4>
+           """
+}
+
+def createToolsSection(toolFileNames) {
+    def toolLinksRows =
+            toolFileNames.collect {
+                toolName ->
+                    """<tr>
+                        <td>$toolName</td>
+                        <td>${aws.s3Deploy().agileReporter.createLink(RELEASE_VERSION_PATH + "/"+toolName ,toolName)}</td>
+                    </tr>"""
+            }.join('')
+
+    return convertToTable(
+            description: 'Tools',
+            firstColumn: 'Tool Name', secondColumn: 'Download Link',
+            rows: toolLinksRows
+    )
+}
+
+def createComponentsSection() {
+    def versionByComponentName = findComponentsAndVersions()
+
+    def componentRows =
+            versionByComponentName.collect {
+                componentName, version ->
+                    """<tr>
+                        <td>$componentName ($version)
+                        <td>
+                            <a href='https://bitbucket.lombardrisk.com/projects/CS/repos/$componentName/commits?until=refs%2Ftags%2F$version'>
+                                Commits until $version
+                            </a>
+                         </td>
+                    </tr>"""
+            }.join('')
+    return convertToTable(
+            description: 'Components',
+            firstColumn: 'Component Name', secondColumn: 'Bitbucket',
+            rows: componentRows
+    )
+}
+
+def findComponentsAndVersions() {
+    def extractNameAndVersion = {
+        def parts = it.split("<|version.component.|>")
+        return [parts[2], parts[3]]
+    }
+
+    return readFile('pom.xml')
+            .split('\n')
+            .findAll { it.contains("<version.component.") }
+            .collect { it.trim() }
+            .collectEntries(extractNameAndVersion)
+}
+
+def convertToTable(Map args) {
+    return """
+        <h3 style='margin-bottom:5px'>${args.description}:</h3>
+        <table class='pane stripped-odd bigtable' style='text-align: left'>
+            <thead>
+                <tr>
+                    <th class='pane-header' style='width:40%'>${args.firstColumn}</th>
+                    <th class='pane-header' style='width:30%'>${args.secondColumn}</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${args.rows}
+            </tbody>
+        </table>"""
+}
+
+void addBuildTagToRepo() {
+    bitbucketTag tag: RELEASE_VERSION, projectPath: 'projects/CS/repos/ocelot-installer'
+}
+
+void notifyFixed() {
+    if (currentBuild.resultIsBetterOrEqualTo('SUCCESS')) {
+        notifier.sendSuccess('# 👍 Pipeline is Green Again❗')
+    }
+}
+
+void deployToM2(){
+    build job: 'ocelot-installer-windows-deploy',
+            parameters: [
+                    string(name: 'INSTALLER', value: "$AR_INSTALLER"),
+                    string(name: 'ENVIRONMENT', value: 'AR-TEST'),
+                    string(name: 'APPLICATION_URL', value: 'http://i-0b4717ab102d15629.internal.aws.lombardrisk.com:8080')
+            ],
+            wait: false
+}

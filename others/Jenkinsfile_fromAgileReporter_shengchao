@@ -1,0 +1,276 @@
+@Library('pipeline-libs') _
+
+MVN = maven.initialiseMvn()
+OCELOT_POM = 'pom.xml'
+BUILD_VERSION = "1.${env.BUILD_NUMBER}.0"
+BUILD_INFO = maven.newBuildInfo()
+
+OCELOT_WAR = 'ocelot.war'
+OCELOT_VERSIONED_WAR = "ocelot-${BUILD_VERSION}.war"
+OCELOT_WAR_LOCAL_PATH = "ocelot-web/ocelot-web-war/target/$OCELOT_WAR"
+
+MIGRATION_DIR_NAME = 'ocelot-db-migration'
+MIGRATION_SCRIPTS_ZIP = "$MIGRATION_DIR_NAME-${BUILD_VERSION}-scripts.zip"
+MIGRATION_SCRIPTS_LOCAL_PATH = 'ocelot-db-migration/target/ocelot-db-migration-scripts.zip'
+
+AR_NAME = 'AgileREPORTER'
+HOME_DIR = '/home/ec2-user'
+AR_ROOT_DIR = "$HOME_DIR/$AR_NAME"
+BACKUP_DIR = "$HOME_DIR/backups"
+
+DEPLOYMENTS_DIR = "$AR_ROOT_DIR/wildfly-11.0.0.Final/standalone/deployments"
+DEPLOYED_OCELOT_WAR = "$DEPLOYMENTS_DIR/$OCELOT_WAR"
+SCRIPTS_DIR = "$AR_ROOT_DIR/tools/ocelot-dbscript"
+
+CI_PROPERTIES_FILE = 'pipeline/ocelot-smoke-env.properties'
+CI_PROPERTIES_ID = 'ci-pipeline-ocelot'
+CI_STANDALONE_FILE = 'pipeline/standalone-smoke-env.xml'
+CI_STANDALONE_ID = 'ci-pipeline-standalone'
+
+pipeline {
+    agent any
+
+    environment {
+        JAVA_HOME = tool 'OracleJDK8'
+        TEAMS_CHANNEL_URL = 'https://outlook.office.com/webhook/edee457e-63bc-4e9d-8eca-750bbaa3045c@4a78f2c0-297f-426d-b09f-5986924d38e7/JenkinsCI/d548703657364e68ac1e88c175de357f/b07b3f9f-454c-4bc8-b523-7b8a3fabf234'
+    }
+
+    stages {
+        stage('Setup') {
+            steps {
+                setupBuild()
+            }
+        }
+        stage('Version') {
+            steps {
+                generateVersion()
+            }
+        }
+        stage('Unit Tests & S3 Temp') {
+            steps {
+                runBuild()
+
+                uploadArtifactsToTempS3()
+            }
+            post {
+                always {
+                    junit '**/target/*-reports/*.xml'
+                }
+            }
+        }
+        stage('Sonar & Smoke Release') {
+            parallel {
+                stage('SonarQube Analysis') {
+                    steps {
+                        runSonarAnalysis()
+                    }
+                }
+                stage('Smoke environment') {
+                    agent { label 'smoke-env' }
+
+                    options { skipDefaultCheckout true }
+                    steps {
+                        deployToSmokeEnv()
+                    }
+                }
+                stage('Deploy & Tag') {
+                    steps {
+                        deployToArtifactory()
+
+                        tagBuild()
+                    }
+                }
+            }
+        }
+    }
+    post {
+        changed {
+            script { notifier.sendFixed() }
+        }
+        always {
+            script { buildMetric([ application : 'AGILE_REPORTER' ])}
+        }
+    }
+}
+
+void setupBuild() {
+    checkout scm
+
+    BUILD_INFO.env.capture = true
+}
+
+void generateVersion() {
+    echo "Update artifacts to version [$BUILD_VERSION]"
+
+    notifier.runAndNotifyOnFailure('Failed to generate and update versions') {
+        def commitBuildVersion = "versions:set versions:commit -DnewVersion=$BUILD_VERSION".toString()
+
+        MVN.run goals: commitBuildVersion, pom: OCELOT_POM
+
+        updatePropertiesVersions()
+    }
+}
+
+private void updatePropertiesVersions() {
+    writeFile(
+            file: CI_PROPERTIES_FILE,
+            text: readFile(CI_PROPERTIES_FILE)
+                    .replaceAll("internal.version=.*", "internal.version=$BUILD_VERSION")
+    )
+    stash includes: CI_PROPERTIES_FILE, name: CI_PROPERTIES_ID
+    stash includes: CI_STANDALONE_FILE, name: CI_STANDALONE_ID
+}
+
+
+void runBuild() {
+    notifier.runAndNotifyOnFailure('UT/IT failures found') {
+        withCredentials([
+                usernamePassword([
+                        credentialsId   : 'Oracle_RDS_MASTER',
+                        passwordVariable: 'rdsPassword',
+                        usernameVariable: 'rdsUsername'])
+        ]) {
+            def rdsDetails = "-Doracle.sys.username=${rdsUsername} -Doracle.sys.password=${rdsPassword}"
+            def uniqueSchemaProfile = "-P unique -Dbuild.number=#${env.BUILD_NUMBER}# $rdsDetails"
+            def cleanAndInstall = "clean install -Djrebel.plugin.skip=true -Dspring.profile=ci $uniqueSchemaProfile"
+
+            BUILD_INFO =
+                    MVN.run goals: cleanAndInstall.toString(), pom: OCELOT_POM, buildInfo: BUILD_INFO
+        }
+    }
+}
+
+void uploadArtifactsToTempS3() {
+    notifier.runAndNotifyOnFailure('failed to upload an installer') {
+        echo "Upload artifacts to S3"
+        aws.s3Temp().agileReporter.upload(OCELOT_WAR_LOCAL_PATH, OCELOT_VERSIONED_WAR)
+        aws.s3Temp().agileReporter.upload(MIGRATION_SCRIPTS_LOCAL_PATH, MIGRATION_SCRIPTS_ZIP)
+    }
+}
+
+void runSonarAnalysis() {
+    notifier.runAndNotifyOnFailure('Failed Sonar analysis') {
+        MVN.run goals: 'sonar:sonar', pom: OCELOT_POM
+    }
+}
+
+void deployToSmokeEnv() {
+    notifier.runAndNotifyOnFailure('Failed to deploy to Smoke Environment') {
+        releaseToSmokeEnv()
+        retry(3){
+            checkDeployment()
+        }
+    }
+}
+
+void releaseToSmokeEnv() {
+    prepareArtifacts()
+
+    backupAR()
+
+    def errMessage
+    try {
+        patchCurrentRelease()
+        startService()
+    } catch (exception) {
+        restoreAR()
+        startService()
+
+        errMessage = exception.message
+    }
+
+    if (errMessage != null)
+        error errMessage
+}
+
+private void prepareArtifacts() {
+    deleteDir()
+
+    echo "Download $OCELOT_VERSIONED_WAR from Temp S3"
+    aws.s3Temp().agileReporter.download(OCELOT_VERSIONED_WAR, OCELOT_VERSIONED_WAR)
+	aws.s3Temp().agileReporter.download(MIGRATION_SCRIPTS_ZIP, MIGRATION_SCRIPTS_ZIP)
+
+	unzip zipFile: MIGRATION_SCRIPTS_ZIP, dir: "."
+}
+
+private void backupAR() {
+    sh """
+        echo "Backup AgileREPORTER"
+
+        sudo chmod +x -R $AR_ROOT_DIR
+        sudo $AR_ROOT_DIR/bin/service.sh stop  
+
+        mkdir -p $BACKUP_DIR
+        rm -rf $BACKUP_DIR/*
+
+        cp -r $AR_ROOT_DIR $BACKUP_DIR
+    """
+}
+
+private void patchCurrentRelease() {
+    unstash CI_PROPERTIES_ID
+    unstash CI_STANDALONE_ID
+
+    sh """
+        echo "Patch current release and Reinstall"
+        
+        cp $CI_PROPERTIES_FILE $AR_ROOT_DIR/ocelot.properties
+        cp $CI_STANDALONE_FILE $AR_ROOT_DIR/wildfly-11.0.0.Final/standalone/configuration/standalone.xml
+
+        rm -f $DEPLOYED_OCELOT_WAR*
+        cp $OCELOT_VERSIONED_WAR $DEPLOYED_OCELOT_WAR
+
+        rm -rf $SCRIPTS_DIR/*
+        cp -r $MIGRATION_DIR_NAME/* $SCRIPTS_DIR
+    """
+    unzip zipFile: "$DEPLOYED_OCELOT_WAR", dir: "$DEPLOYMENTS_DIR/ocelot"
+    unzip zipFile: "$DEPLOYMENTS_DIR/activemq-5.8.0.rar", dir: "$DEPLOYMENTS_DIR/activemq-5.8.0"
+
+    def targets = ['makeTemp', 'explodeOcelotWAR', 'copyOcelotProperties', 'setWebXml', 'configOcelotConfigToolJar',
+                   'unexplodeAndDeployOcelotWAR', 'flywayDatabase', 'reApplyAlias', 'deleteTemp'].join(' ')
+    sh """
+        echo "Apply patches through ant targets"
+
+        java -cp $HOME_DIR/lib/*:$AR_ROOT_DIR/tools/lib/*:$AR_ROOT_DIR/tools/anttool/* \
+            org.apache.tools.ant.Main -buildfile $AR_ROOT_DIR/build.xml $targets            
+    """
+}
+
+private void restoreAR() {
+    sh """
+        echo "Restore backups"
+        rm -rf $AR_ROOT_DIR
+        cp -r $BACKUP_DIR/$AR_NAME $HOME_DIR
+        sudo systemctl daemon-reload
+    """
+}
+
+private void startService() {
+    sh "sudo $AR_ROOT_DIR/bin/service.sh start"
+
+    def statusOut = sh script: "sudo $AR_ROOT_DIR/bin/service.sh status", returnStdout: true
+    def runningStatus = statusOut.split('\n').find {
+        it.contains('is running')
+    }
+    if (!runningStatus) {
+        error "AgileREPORTER Service did not start up correctly. Status:\n $statusOut"
+    }
+}
+
+void deployToArtifactory() {
+    notifier.runAndNotifyOnFailure('Failed deploying to Artifactory') {
+        MVN.deployer.deployArtifacts BUILD_INFO
+
+        maven.artifactoryServer().publishBuildInfo BUILD_INFO
+    }
+}
+
+void tagBuild() {
+    bitbucketTag tag: BUILD_VERSION, projectPath: 'projects/CS/repos/ocelot-platform'
+
+    currentBuild.displayName = BUILD_VERSION
+}
+
+void checkDeployment(){
+    ar.checkAgileReporterUp('http://ar-smoke-env-aws.london.lombardrisk.com:8080')
+}

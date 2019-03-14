@@ -1,0 +1,190 @@
+#!groovy
+S3_BUCKET = 'lrm-deploy'
+Local_Oracle='oracle@172.20.20.49'
+Local_Linux='test@172.20.31.7'
+AR_Repo_Linux='repository/AgileREPORTER/'
+ARProject_Prefix=getprojectFolder(env.JOB_NAME)
+ARProduct_Prefix=getprojectFolder(env.JOB_NAME)
+ARProduct_Repo_Linux='repository/ARProduct/'+ARProject_Prefix+'/candidate-release/'
+ARProject_Properties='package.properties'
+pipeline {
+    agent { label 'SHA-AR-PRODUCT-CI-TEST' }
+    options {
+        timeout(time: 60, unit: 'MINUTES') 
+    }
+    
+    stages {
+        stage('checkout ar product config'){
+			steps{
+				echo "start job ${JOB_URL}"
+				echo "branch number: ${env.BUILD_NUMBER}"
+				//checkoutARProduct(ARProject_Prefix)
+			}
+		}
+		stage('zip ar product config and upload to repo'){
+			steps{
+				packageARProduct(ARProject_Prefix,env.BUILD_NUMBER)
+			}
+		}
+		stage('download ar installer'){
+			steps{
+				downloadARInstaller(ARProject_Prefix)
+			}
+		}
+        stage('TODO deploy on linux'){
+           agent { label 'SHA-AR-PRODUCT-CI-TEST' }
+           steps{
+				echo "create oracle database"
+				//sh( returnStatus: true, script: '''ssh '''+Local_Oracle+'''  './impdp_and_expdp_shell/opSchema.sh ora11g PIPEAR4HKMAOWNER' ''')
+				echo "create folder for ar"
+				//sh( returnStatus: true, script: '''ssh '''+Local_Linux+'''  'mkdir PIPEAR4HKMA' ''')
+				
+				sh( returnStatus: true, script: '''ssh '''+Local_Linux+'''  'sh repository/ci-tool/RemoteInstall.sh -help' ''')
+				//sh( returnStatus: true, script: '''ssh '''+Local_Linux+'''  'sh repository/ci-tool/RemoteInstall.sh /home/test/PIPEAR4HKMA 0 /home/test/repository/AgileREPORTER/'''+getMainVersionOfArInstaller(ARProject_Prefix)+'''/AgileREPORTER-'''+getVersionOfArInstaller(ARProject_Prefix)+'''.jar /home/test/repository/AgileREPORTER/'''+getVersionOfArInstaller(ARProject_Prefix)+'''/'''+ARProject_Prefix+'''_ocelot.properties' ''')
+                //sh( returnStatus: true, script: '''ssh '''+Local_Linux+'''  'sh repository/ci-tool/RemoteInstall.sh PIPEAR4HKMA 0 '''+AR_Repo_Linux+getMainVersionOfArInstaller(ARProject_Prefix)+'''/AgileREPORTER-'''+getVersionOfArInstaller(ARProject_Prefix)+'''.jar repository/AgileREPORTER/'''+getVersionOfArInstaller(ARProject_Prefix)+'''/'''+ARProject_Prefix+'''_ocelot.properties' ''')
+				}    
+        }
+        
+		
+    }
+}
+
+void uploadSnapshot(){
+    withAWS(credentials: 'aws') {
+        //s3Upload acl: 'BucketOwnerFullControl', bucket: 'lrmtech-deployment-ireland', cacheControl: '', excludePathPattern: '', file: 'fed/ARforFED_v1.12.1.*.zip', includePathPattern: '', metadatas: [''], path: 'arproduct', workingDir: ''
+        def files = findFiles(glob: '**/ARforFED*') 
+        //echo """${files[0].name}, ${files[0].path}, ${files[0].directory}, ${files[0].length}, ${files[0].lastModified}"""
+        files.each{s3Upload( bucket:S3_BUCKET, path:"arproduct/${it.path}",includePathPattern:"${it.path}")}
+        
+    }
+}
+
+String getprojectFolder(jobName){
+    return jobName[0..jobName.indexOf("_")-1]
+}
+
+String getVersionOfArInstaller(projectFolder){
+    def arInstallerVersion = sh (
+        script: '''awk -F '=' /^ar.installer.version[^.]/'{print $2}' '''+projectFolder+'''/'''+ARProject_Properties,
+        returnStdout: true
+        ).trim()
+    echo "Agile reporter installer version: ${arInstallerVersion}"
+	return arInstallerVersion
+}
+String getMainVersionOfArInstaller(projectFolder){
+    def arInstallerVersion = getVersionOfArInstaller(projectFolder)
+    echo "Agile reporter installer version: ${arInstallerVersion}"
+	return arInstallerVersion[0..arInstallerVersion.indexOf("-")-1]
+}
+String getPrefixOfARProductPackage(projectFolder){
+    def prefix_APRroduct_Pacakge = sh (
+        script: '''awk -F '=' /^package.name.prefix[^.]/'{print $2}' '''+projectFolder+'''/'''+ARProject_Properties,
+        returnStdout: true
+        ).trim()
+    echo "prefix of ar product pacakge: ${prefix_APRroduct_Pacakge}"
+	return prefix_APRroduct_Pacakge
+}
+
+String getVersionOfARProductPackage(projectName,productName){
+    def version_APRroduct_Pacakge = sh (
+        script: '''awk -F '[<>]' /implementationVersion/'{print $3}' '''+projectName+'''/'''+productName+'''/src/manifest.xml''',
+        returnStdout: true
+        ).trim()
+    echo "version of ar product pacakge: ${version_APRroduct_Pacakge}"
+	return version_APRroduct_Pacakge
+}
+String getVersionOfARProductFromManifest(manifestFullPath){
+    def version_APRroduct_Pacakge = sh (
+        script: '''awk -F '[<>]' /implementationVersion/'{print $3}' '''+manifestFullPath,
+        returnStdout: true
+        ).trim()
+    echo "version of ar product pacakge: ${version_APRroduct_Pacakge}"
+	return version_APRroduct_Pacakge
+}
+
+void packageARProduct(projectFolder,packageBuildNumber){
+    def productVersion
+    sh (
+        '''
+			cd ci-script
+			echo java -jar testudo.jar -Dproject='''+projectFolder+''' -Did='''+projectFolder+''' -Dproc=2 -DrunOnJenkins -Drelease
+			java -jar testudo.jar -Dproject='''+projectFolder+''' -Did=ce_dpb -Dproc=2 -DrunOnJenkins -Drelease=b'''+packageBuildNumber+'''
+		'''
+        )
+    //def prefix_APRroduct_Pacakge = getPrefixOfARProductPackage(projectFolder)
+    //def version_APRroduct_Pacakge =getVersionOfARProductPackage(projectFolder)
+	//def files = findFiles(glob: '**/'+prefix_APRroduct_Pacakge+'*'+version_APRroduct_Pacakge+'*') 
+	def manifestFiles = findFiles(glob: '**/src/manifest.xml') 
+	if(manifestFiles.size()>0){
+		for(int festIndex=0;festIndex<manifestFiles.size();festIndex++){
+		    echo "${manifestFiles[festIndex].path}"
+			def productPath=manifestFiles[festIndex].path.replaceAll('/src/manifest.xml','')
+			echo "product path: ${productPath}"
+			def productName=productPath.replaceAll(projectFolder+'/','')
+			echo "product name: ${productName}"
+			def version_APRroduct_Pacakge=getVersionOfARProductFromManifest(manifestFiles[festIndex].path)
+			def files = findFiles(glob: productPath+'/*'+version_APRroduct_Pacakge+'*') 
+	        def versionPattern='(\\d+\\.){2,}\\d+'
+	        for(int index=0;index<files.size();index++){
+	            def versionMatcher=(files[index].name=~versionPattern)
+	            versionMatcher.matches()
+	            assert files[index].name=~versionPattern
+	            productVersion=''+versionMatcher[0][0]
+	            versionMatcher=null
+	            echo "$productVersion"
+	            sh( returnStatus: true, script: '''ssh '''+Local_Linux+'''  'mkdir -p '''+ARProduct_Repo_Linux+productVersion+'''' ''')
+	            def fileExisted=sh(returnStdout: true, script: '''ssh '''+Local_Linux+''' '[ -e '''+ARProduct_Repo_Linux+productVersion+'/'+files[index].name+''' ]; echo $?' ''').trim()
+	            if(fileExisted=='0'){
+	                echo "Agile Reporter Product Package already exists.No need to download again."
+	            }else{
+	                sh( returnStatus: true, script: 'scp '+files[index].path+' '+Local_Linux+':'+ARProduct_Repo_Linux+productVersion+'/'+files[index].name)
+	            }
+	        }
+	        //files.each{sh( returnStatus: true, script: 'scp '+it.path+' '+Local_Linux+':'+ARProduct_Repo_Linux+productVersion+'/'+it.name)}
+            echo "upload product package to S3"
+            withAWS(credentials: 'aws') {
+                echo """${files[0].name}, ${files[0].path}, ${files[0].directory}, ${files[0].length}, ${files[0].lastModified}"""
+                files.each{s3Upload( bucket:S3_BUCKET, path:"arproduct/${it.path}",includePathPattern:"${it.path}")}
+            }
+		}
+	}else{
+	    echo "there is no packages, generated with failures."
+	}
+}
+
+void checkoutARProduct(projectFolder){
+    checkout([$class: 'GitSCM', branches: [[name: '*/master']], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'CleanBeforeCheckout'], [$class: 'RelativeTargetDirectory', relativeTargetDir: "${projectFolder}"]], submoduleCfg: [], userRemoteConfigs: [[credentialsId: '46afdff1-cdd3-4098-b8af-d904b4d298aa', url: "ssh://git@bitbucket.lombardrisk.com:7999/cprod/${projectFolder}.git"]]])
+                
+    checkout([$class: 'GitSCM', branches: [[name: '*/master']], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'CleanBeforeCheckout'], [$class: 'RelativeTargetDirectory', relativeTargetDir: 'ci-script']], submoduleCfg: [], userRemoteConfigs: [[credentialsId: '46afdff1-cdd3-4098-b8af-d904b4d298aa', url: 'ssh://git@bitbucket.lombardrisk.com:7999/cprod/ci-script.git']]])
+}
+
+
+void downloadARInstaller(projectFolder){
+    def downfiles
+   
+    def arInstallerVersion = getVersionOfArInstaller(projectFolder)
+    
+    withAWS(credentials: 'aws') {
+        downfiles=s3FindFiles(bucket:S3_BUCKET, path:'AgileREPORTER/Releases/CandidateReleases/', glob:"**/AgileREPORTER-${arInstallerVersion}.jar")
+        //downfiles.each{print "${it.name},${it.path},${it.length},${it.lastModified}"}
+    }
+    if(downfiles.size()>0){
+        def ar_path=downfiles[0].path[0..downfiles[0].path.indexOf(downfiles[0].name)-1]
+	
+	    sh( returnStatus: true, script: '''ssh '''+Local_Linux+'''  'mkdir -p '''+AR_Repo_Linux+ar_path+'''' ''')
+	    def jarExisted=sh(returnStdout: true, script: '''ssh '''+Local_Linux+''' '[ -e '''+AR_Repo_Linux+downfiles[0].path+''' ]; echo $?' ''').trim()
+
+        if(jarExisted=='0'){//existed
+            echo "Agile Reporter jar already exists.No need to download again."
+        }else{
+            withAWS(credentials: 'aws') {
+                s3Download(bucket:S3_BUCKET, path:'AgileREPORTER/Releases/CandidateReleases/'+downfiles[0].path,file:downfiles[0].path,force:true)
+            }
+            def status=sh( returnStatus: true, script: 'scp '+downfiles[0].path+' '+Local_Linux+':'+AR_Repo_Linux+ar_path)
+            echo "downloaded Agile Reporter jar completely."
+    }
+    }else{
+	    echo "there is no packages existed in bucket server, please check your ar.installer.version in ${ARProject_Properties}."
+	}
+	
+}

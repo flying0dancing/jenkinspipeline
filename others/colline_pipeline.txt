@@ -1,0 +1,454 @@
+/**
+author:Shuaibing.Li@lombardrisk.com
+**/
+
+pipeline {
+    agent { label 'master' }
+    environment {
+        build_branch = 'master'
+        CucumberTags = '@SmokeTest'
+        test_concurrency = '2'
+        Deploy_to_SH_test = "true"
+    }
+    stages {
+        stage ('checkout SCM'){
+            //agent { label 'linux-redhat7.3-agent' }
+            steps{
+                sh "/sbin/ifconfig"
+                sh "echo workspace is ${workspace}"
+                checkout([$class: 'GitSCM', branches: [[name: env.build_branch]], doGenerateSubmoduleConfigurations: false, 
+                extensions: [[$class: 'CheckoutOption', timeout: 30], [$class: 'CloneOption', depth: 0, noTags: false, 
+                reference: '/home/jenkins/workspace/colline_mirror', shallow: false, timeout: 20], [$class: 'CleanBeforeCheckout']], 
+                gitTool: 'local_git', submoduleCfg: [], userRemoteConfigs: [[credentialsId: '42a66f27-e0fe-442b-af21-a5a71ae55d34', 
+                url: 'ssh://git@bitbucket.lombardrisk.com:7999/colline/Colline.git']]])
+                //checkout([$class: 'GitSCM', branches: [[name: "${build_branch}"]], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'CloneOption', depth: 0, noTags: false, reference: '/home/jenkins/workspace/colline_mirror', shallow: false, timeout: 20]], gitTool: 'local_git', submoduleCfg: [], userRemoteConfigs: [[credentialsId: '42a66f27-e0fe-442b-af21-a5a71ae55d34', url: 'ssh://git@bitbucket.lombardrisk.com:7999/colline/Colline.git']]])
+                //sleep 10
+            }
+            post{
+                failure{
+                    script{
+                        email_notification("checkout_fail")
+                    }
+                }
+            }
+        }
+        stage ("compile & UT & IT"){
+            //agent { label 'linux-redhat7.3-agent' }
+            environment { 
+                pom = readMavenPom file: 'pom.xml'
+                ver = pom.getVersion()
+                GIT_REVISION = sh(returnStdout: true, script: 'git rev-parse HEAD').trim()
+            }
+            steps {
+                
+                sh "echo workspace is ${workspace}"
+                sh "/sbin/ifconfig"
+                httpRequest outputFile: 'build_number.zip', responseHandle: 'NONE', url: 'http://jenkins-c.lombardrisk.com:8080/userContent/Colline_maven/buildnumber/colline/*zip*/colline.zip'
+                unzip dir: 'buildnumber', glob: '', zipFile: 'build_number.zip'
+                sh '''
+                    function getbuildversion(){ 
+                    echo COLLINE version in the pom.xml is ${ver}
+                    echo $ver | egrep \\(^[1-9]\\([0-9]\\*\\)\\|^[0-9]\\)\\\\.\\([1-9]\\([0-9]\\*\\)\\|[0-9]\\)\\\\.\\([1-9]\\([0-9]\\*\\)\\|[0-9]\\)\\\\.\\([1-9]\\([0-9]\\*\\)\\|[0-9]\\)\\(\\\\.\\([1-9]\\([0-9]\\*\\)\\|[0-9]\\)\\)?\\(\\\\.\\([1-9]\\([0-9]\\*\\)\\|[0-9]\\)\\)?\\(-F[0-9]\\*\\)?\\(-SNAPSHOT\\)?\\$
+                    if [ $? != 0 ];
+                      then
+                      echo error version number format, format should be egrep "(^[1-9]([0-9]*)|^[0-9]).([1-9]([0-9]*)|[0-9]).([1-9]([0-9]*)|[0-9]).([1-9]([0-9]*)|[0-9])(.([1-9]([0-9]*)|[0-9]))?(.([1-9]([0-9]*)|[0-9]))?(-F[0-9]*)?(-SNAPSHOT)?$"
+                      exit 1
+                    fi
+                
+                    ORIGINAL_VER=$ver
+                    buildversion=`echo $ver | sed  -s 's/-SNAPSHOT//'`
+                    buildnumberfile=buildnumber/colline/colline-${buildversion}-buildnumber
+                    if (echo $ver | grep SNAPSHOT)
+                      then
+                      [ -f ${buildnumberfile} ] && build_nb=`cat ${buildnumberfile}` || build_nb=0
+                      build_nb=$(($build_nb + 1))
+                      echo $build_nb > ${buildnumberfile}
+                      RELEASE_NAME=${buildversion}-b${build_nb}
+                      else
+                      RELEASE_NAME=$ver
+                    fi
+                    install_folder=`echo ${RELEASE_NAME} | cut -d'-' -f 1`
+                    echo RELEASE_NAME=$RELEASE_NAME > releasename
+                    echo buildversion=$buildversion >> releasename
+                    echo install_folder=R$install_folder >> releasename
+                }
+                
+                function getLabelName(){
+                    if [ ${RELEASE_LABEL}X == X ];then
+                          RELEASE_LABEL=${RELEASE_NAME}
+                    fi
+                    echo RELEASE_LABEL=${RELEASE_LABEL} >> releasename
+                }
+                function generate_env_variable(){
+                    getbuildversion
+                    getLabelName
+                }
+                # get version in pom.xml and temporary build version
+                generate_env_variable
+                '''
+                script{
+                env.GIT_REVISION=GIT_REVISION
+                def props = readProperties  file: './releasename'
+                env.RELEASE_NAME = props[ 'RELEASE_NAME' ]
+                env.install_folder = props[ 'install_folder' ]
+                env.buildversion = props[ 'buildversion' ]
+                env.RELEASE_LABEL = props[ 'RELEASE_LABEL' ]
+                System.setProperty("org.jenkinsci.plugins.durabletask.BourneShellScript.HEARTBEAT_CHECK_INTERVAL", "500");
+                }
+                
+                withMaven(globalMavenSettingsConfig: '55679e12-3a85-48ec-b60d-bbff6d7b7847', jdk: 'jdk1.8u92', maven: 'maven3.2.2', mavenOpts: '-Xmx2800M -XX:MaxPermSize=524M', mavenSettingsConfig: '269baba0-476d-4bc6-895c-08449f0ed934',options: [artifactsPublisher(disabled: true),jacocoPublisher(disabled: true)]) {
+                sh "mvn versions:set -DnewVersion=${RELEASE_NAME} versions:commit"
+                }
+                
+                script{
+                    env.JAVA_HOME="${tool 'jdk1.8u92'}"
+                    def server = Artifactory.server "-2131115395@1438616980503"
+                    def buildInfo = Artifactory.newBuildInfo()
+                    buildInfo.env.capture = true
+                    buildInfo.name = 'colline_installer_package'
+                    buildInfo.number = env.RELEASE_LABEL
+                    def promotionConfig = [
+                    // Mandatory parameters
+                    'buildName'          : buildInfo.name,
+                    'buildNumber'        : buildInfo.number,
+                    'targetRepo'         : 'libs-prod-ready-local',
+                    // Optional parameters
+                    'comment'            : 'this is the promotion comment',
+                    'sourceRepo'         : 'libs-staging-local',
+                    'status'             : 'Released',
+                    'includeDependencies': true,
+                    'copy'               : true,
+                    // 'failFast' is true by default.
+                    // Set it to false, if you don't want the promotion to abort upon receiving the first error.
+                    'failFast'           : true
+                    ]
+                    Artifactory.addInteractivePromotion server: server, promotionConfig: promotionConfig, displayName: "Promote me please"
+                    def rtMaven = Artifactory.newMavenBuild()
+                    rtMaven.tool = "maven3.2.2"
+                    rtMaven.deployer releaseRepo: 'libs-release-local', snapshotRepo: 'libs-snapshot-local', server: server
+                    //rtMaven.resolver releaseRepo: 'libs-release', snapshotRepo: 'libs-snapshot', server: server
+                    configFileProvider([configFile(fileId: '55679e12-3a85-48ec-b60d-bbff6d7b7847', replaceTokens: true, variable: 'My_setting')]) {
+                        rtMaven.opts = "-Xmx2800M"
+                        rtMaven.run pom: 'pom.xml', goals: '-s ${My_setting} clean org.jacoco:jacoco-maven-plugin:0.7.9:prepare-agent package -Pcode-coverage -Pintegration-test -Dcolline.label=${RELEASE_LABEL} -Dmaven.test.failure.ignore=false  -Dintegrationtest.jdbc.url=${GLOBAL_ENV_COLLINE_INTEGRATION_TEST_DB_JDBC_URL} -Dintegrationtest.jdbc.adminusername=${GLOBAL_ENV_COLLINE_INTEGRATION_TEST_DB_ADMIN_USER_NAME}  -Dintegrationtest.jdbc.adminpassword=${GLOBAL_ENV_COLLINE_INTEGRATION_TEST_DB_ADMIN_USER_PASSWORD}  -Dintegrationtest.jdbc.testusername=${JOB_NAME}_${BUILD_NUMBER}  -Dintegrationtest.database.doNotDropUserWhenTestFinished=false', buildInfo: buildInfo
+                    }
+                    server.publishBuildInfo buildInfo
+                }
+            }
+            post{
+                failure{
+                    script{
+                        email_notification("make intaller fail")
+                    }
+                }
+            }
+        }
+        
+        stage('package installer'){
+            //agent { label 'linux-redhat7.3-agent' }
+            steps{
+                sh "/sbin/ifconfig"
+                sh "echo workspace is ${workspace}"
+                sh'''
+                    cd ${WORKSPACE}/release
+                    rm -rf ../colline.zip
+                    if [  -f "target/colline.jar" ] && [ ! -d "target/installation-package/" ]; then
+                        zip -r -j ../colline.zip target/colline.jar target/licence/lrsFullLicence.licence target/standalone/ServerInstall.colline/colline_template.properties
+                    fi
+                    if [ ! -f "target/colline.jar" ] && [  -d "target/installation-package/" ]; then
+                        zip -r -j ../colline.zip target/installation-package/
+                        cd ${WORKSPACE}
+                        md5sum  colline.zip > colline-installer-${RELEASE_NAME}.md5
+                    fi
+                    git tag -f ${RELEASE_NAME}
+                '''
+                //sleep 10
+                }
+            post{
+                failure{
+                    script{
+                        email_notification('package fail')
+                    }
+                }
+            }
+        }
+        stage("upload installer to s3"){
+            //agent { label 'linux-redhat7.3-agent' }
+            steps{
+                sh "/sbin/ifconfig"
+                sh "echo workspace is ${workspace}"
+                script{
+                    env.project_dir_in_s3="colline/release/"
+                    //env.installer_path_in_s3="DAILY/${env.JOB_NAME}/${env.JOB_NAME}_${env.build_branch}_${env.BUILD_NUMBER}_${env.RELEASE_NAME}/"
+                    env.installer_path_in_s3="CandidateReleases/${env.install_folder}/${env.RELEASE_NAME}/"
+                    env.installer_name_in_s3="colline.zip"
+                    env.installer_full_path_in_s3=env.project_dir_in_s3 + env.installer_path_in_s3 + env.installer_name_in_s3
+                    //env.last_installer_full_path_in_s3=env.project_dir_in_s3 + "DAILY/${env.JOB_NAME}/${env.JOB_NAME}_${env.build_branch}_last/" + env.installer_name_in_s3
+                    env.installer_md5_file="colline-installer-" + env.RELEASE_NAME + ".md5"
+                    env.installer_md5_file_full_path_in_s3=env.project_dir_in_s3 + env.installer_path_in_s3 + env.installer_md5_file
+                }
+                withAWS(region: 'eu-west-1') {
+                    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', accessKeyVariable: 'AWS_ACCESS_KEY_ID', credentialsId: '1cba9e24-0388-44a9-ad19-75a6f2107b68', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+                    s3Upload acl: 'BucketOwnerFullControl', bucket: 'lrm-deploy', cacheControl: '', excludePathPattern: '', file: "colline.zip", metadatas: [''], path: env.installer_full_path_in_s3, workingDir: '.'
+                    //s3Copy acl: 'BucketOwnerFullControl', cacheControl: '', fromBucket: 'lrm-deploy', fromPath: env.installer_full_path_in_s3, metadatas: [''], sseAlgorithm: '', toBucket: 'lrm-deploy', toPath: env.last_installer_full_path_in_s3
+                    s3Upload acl: 'BucketOwnerFullControl', bucket: 'lrm-deploy', cacheControl: '', excludePathPattern: '', file: env.installer_md5_file, metadatas: [''], path: env.installer_md5_file_full_path_in_s3, workingDir: '.'
+                    }
+                }
+                withCredentials([sshUserPrivateKey(credentialsId: '1e6a2fbb-0566-4edf-a5c4-3978f33fd702', keyFileVariable: 'abkey', passphraseVariable: '', usernameVariable: '')]) 
+                {
+                    sh "scp -o StrictHostKeyChecking=no -i ${abkey} buildnumber/colline/colline-${buildversion}-buildnumber jenkins@10.88.4.6:/opt/jenkins/userContent/Colline_maven/buildnumber/colline/"
+                }
+                sshagent(['42a66f27-e0fe-442b-af21-a5a71ae55d34']) {
+                    sh "git push -f origin ${RELEASE_NAME}:${RELEASE_NAME}"
+                }
+                //sleep 10
+            }
+            post{
+                failure{
+                    script{
+                        email_notification('uploade to s3 fail')
+                    }
+                }
+            }
+        }
+        stage('automated UAT & sonar scan & PST & veracode scan'){
+            parallel {
+                stage('automated smoke testing matrix'){
+                    steps{
+                        sh "echo workspace is ${workspace}"
+                        sh "/sbin/ifconfig"
+                        echo "stage automated smoke testing matrix"
+                        httpRequest outputFile: 'auto_test_daily_build_env.zip', responseHandle: 'NONE', url: 'http://jenkins-c.lombardrisk.com:8080/userContent/Colline_maven/auto_test_daily_build_env/*zip*/auto_test_daily_build_env.zip'
+                        unzip dir: '.', glob: '', zipFile: 'auto_test_daily_build_env.zip'
+                        sh'''
+                        cd auto_test_daily_build_env
+                        mkdir -p env
+                        rm -f env/*.property
+                        cp colline-*-${build_branch}.property env
+                        '''
+                        
+                        script {
+                            smoke_testing_matrix()
+                            //echo "aaaaaaa"
+                        }
+                        sh "echo ${install_folder}"
+                        
+                        }
+                    }
+                stage('sonar scan'){
+                    //agent { label 'linux-redhat7.3-agent' }
+                    steps{
+                        sh "echo run sonar"
+                        sh "echo workspace is ${workspace}"
+                        sh "/sbin/ifconfig"
+                        withMaven(globalMavenSettingsConfig: '55679e12-3a85-48ec-b60d-bbff6d7b7847', jdk: 'jdk1.8u92', maven: 'maven3.2.2', mavenOpts: '-Xmx2800M -XX:MaxPermSize=524M', mavenSettingsConfig: '269baba0-476d-4bc6-895c-08449f0ed934') {
+                            sh "mvn sonar:sonar -Dsonar.host.url=http://sonar.lombardrisk.com -Dsonar.branch=${build_branch}"
+                        }
+                        //sleep 3
+                    }
+                }
+                stage('Veracode scan'){
+                    agent { label 'master' }
+                    steps{
+                        sh'''
+                        echo Veracode scan
+                        echo workspace is ${workspace}
+                        /sbin/ifconfig
+                        rm -rf *
+                        '''
+                        script{
+                            env.colline_uploadIncludesPattern="colline-" + env.RELEASE_NAME + ".ear"
+                        }
+                        withAWS(region: 'eu-west-1') {
+                            withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', accessKeyVariable: 'AWS_ACCESS_KEY_ID', credentialsId: '1cba9e24-0388-44a9-ad19-75a6f2107b68', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+                            s3Download bucket: 'lrm-deploy', file: 'colline.zip', force: true, path: env.installer_full_path_in_s3
+                            }
+                        }
+                        unzip dir: '.', glob: '', zipFile: 'colline.zip'
+                        withCredentials([usernamePassword(credentialsId: '5f4bbb19-d3cc-4b02-9d7b-bd991685d3fd', passwordVariable: 'password', usernameVariable: 'Jenkins_Veracode')]) {
+                           veracode applicationName: 'Colline', createProfile: true, criticality: 'VeryHigh', debug: true, fileNamePattern: '', pHost: '', pPassword: '', pUser: '', replacementPattern: '', sandboxName: '', scanExcludesPattern: '', scanIncludesPattern: '', scanName: env.RELEASE_NAME, uploadExcludesPattern: '', uploadIncludesPattern: env.colline_uploadIncludesPattern, vid: '', vkey: '', vpassword: "${password}", vuser: "${Jenkins_Veracode}"
+                        }
+                        
+                    }
+                }
+                stage('PST'){
+                    agent none 
+                    steps{
+                        build(
+                        //job: 'STUB_JOB',
+                        job: 'COLLINE_PST_ENGINE',
+                        //job: 'COLLINE_PST_DEPLOY',
+                        wait: true,
+                        propagate: false,
+                        parameters: [
+                        [$class: 'StringParameterValue', name: 'JmeterScriptBranch', value: env.build_branch],
+                        [$class: 'StringParameterValue', name: 'JmeterTestCaseConfigFile', value: "suites/smoke.xml"],
+                        [$class: 'StringParameterValue', name: 'CollineInstallerPath', value: env.installer_path_in_s3],
+                        [$class: 'StringParameterValue', name: 'JDK_Version', value: "jdk1.8.0_144"],
+                        [$class: 'StringParameterValue', name: 'License', value: "15.4_full_lrs.licence"],
+                        [$class: 'StringParameterValue', name: 'APP_EC2_Type', value: "m3.2xlarge"],
+                        [$class: 'StringParameterValue', name: 'OS_Type', value: "awslinux_image"],
+                        [$class: 'StringParameterValue', name: 'Database_Type', value: "oracle"],
+                        [$class: 'StringParameterValue', name: 'db_server_profile', value: "colline-15.3.0.0-b54_benchmark"],
+                        [$class: 'StringParameterValue', name: 'DATABASE_EC2_Type', value: "m3.2xlarge"],
+                        [$class: 'StringParameterValue', name: 'jvm_heapsize_min', value: "20480M"],
+                        [$class: 'StringParameterValue', name: 'jvm_heapsize_max', value: "20480M"],
+                        [$class: 'StringParameterValue', name: 'messaging_consumer_count', value: "10"],
+                        [$class: 'StringParameterValue', name: 'datasource_pool_size_min', value: "5"],
+                        [$class: 'StringParameterValue', name: 'datasource_pool_size_max', value: "100"],
+                        [$class: 'StringParameterValue', name: 'Database_Image', value: "ami-0afa002849e41eb6c"],
+                        [$class: 'StringParameterValue', name: 'Purpose', value: "Launch a Colline automated performance testing ENV for daily build branch "+env.build_branch]
+                        ]
+                        )
+                    }
+                }
+            }
+            post{
+                always{
+                    script{
+                        email_notification('auto test fail')
+                    }
+                }
+            }
+        }
+        
+        stage ('Approve to SH manually testing'){
+            agent none
+            when {
+                expression { currentBuild.currentResult == "UNSTABLE" && env.Deploy_to_SH_test == "true" }
+            }
+            steps{  
+                    echo 'if go to SH manually testing?'
+                    timeout(time: 6, unit: 'HOURS'){
+                        input (
+                            message: 'Deploy to SH manually testing',
+                            submitter: "Jane Zhang,Kent Gu,Shawn Shen,Talat Rani,Shuaibing Li"
+                        )
+                    }
+                    echo 'go to SH manually testing'
+            }
+        }
+        
+        stage ('Deploy to SH manually testing'){
+            agent none
+            when {
+                expression { env.Deploy_to_SH_test == "true" }
+            }
+            steps{
+                echo env.Deploy_to_SH_test
+                build(
+                        //job: 'STUB_JOB',
+                        job: 'COLLINE_AUTO_PREPARE_TEST_ENV_FQA',
+                        //job: 'COLLINE_STAGING',
+                        wait: true,
+                        propagate: false,
+                        parameters: [
+                        [$class: 'StringParameterValue', name: 'BRANCH', value: env.build_branch],
+                        [$class: 'StringParameterValue', name: 'CollineInstallerPath', value: env.installer_path_in_s3]
+                        ]
+                    )
+            }
+        }
+        /**stage ('Approve to LD manually UAT'){
+            agent none
+            steps{
+                    echo 'if go to LD manually UAT?'
+                    input 'Deploy to LD manually UAT'
+                    echo 'go to LD UAT'
+            }
+        }
+        
+        stage ('Deploy to LD manually UAT'){
+            agent none
+            steps{
+                build(
+                        job: 'STUB_JOB',
+                        //job: 'COLLINE_AUTO_PREPARE_TEST_ENV_FQA',
+                        //job: 'COLLINE_STAGING',
+                        wait: true,
+                        propagate: false,
+                        parameters: [
+                        [$class: 'StringParameterValue', name: 'BRANCH', value: env.build_branch],
+                        [$class: 'StringParameterValue', name: 'CollineInstallerPath', value: env.installer_path_in_s3]
+                        ]
+                    )
+                }
+            }**/
+    }
+}
+
+def email_notification(email_type){
+    email_body="Hi<br><br>"+
+        "Build of Colline " + env.RELEASE_NAME +" (label: " + env.RELEASE_LABEL+")" + " - " + currentBuild.currentResult + "<br><br>" +
+        "Git revision: " + env.GIT_REVISION + "<br><br>" +
+        "Jenkins Build Link: " + env.JENKINS_URL + "/blue/organizations/jenkins/"+ env.JOB_NAME +"/detail/"+ env.JOB_NAME +"/"+ env.BUILD_NUMBER +"/pipeline"  + "<br><br>" +
+        "If package successful, the installer will be stored in " + "https://s3.console.aws.amazon.com/s3/buckets/lrm-deploy/" + env.project_dir_in_s3 + env.installer_path_in_s3 + "<br><br>" +
+        '''
+        By the way, Colline server logs are uploaded to NAS storage if have any <br>
+        \\\\sha-nas-a\\CIPlatform\\testlog\\functional_test_log\\COLLINE_SYSTEM_TEST_FUNCTIONAL\\ ${ FUNCTIONAL_TEST_JOB BUILD_NUMBER}\\result.tar.gz<br>
+        \\\\sha-nas-a\\CIPlatform\\testlog\\smoke_test_log\\COLLINE_SYSTEM_TEST_SMOKE_2\\ ${ SMOKE_TEST_JOB_BUILD_NUMBER}\\result.tar.gz<br>
+        <br>
+        Reference about Jenkins Jobs, <a href="https://esource.lombardrisk.com/org/engineering/_layouts/15/start.aspx#/Engineering%20Wiki/Colline%20Architecture%20Home.aspx">link</a> <br>
+        <br>
+        @Automation team, please help to analyze the test report if Jenkins build failed, and reply this email with the analysis report.<br>
+        <br>
+        Thanks<br>
+        Colline CI/CD Platform<br>'''
+    email_body_2="Checkout code failed"
+    email_subject = env.RELEASE_NAME +" FROM " +  env.build_branch + " - " + currentBuild.currentResult +"!" + "- DAILY JOB"
+    email_subject_2 = "BUILD BRANCH " +  env.build_branch + " - " + currentBuild.currentResult +"!" + "- DAILY JOB"
+    if (email_type == "checkout_fail"){
+        email_subject= email_subject_2
+        email_body=email_body_2
+    }
+    emailext body:email_body, 
+    subject: email_subject, 
+    to: 'SHCollineAll,TeamAragorn,SShen@vermeg.com,SLi@vermeg.com,BChen@vermeg.com,KGu@vermeg.com'
+}
+
+def getallparameters(file_path){
+    def allparameters=[]
+	Properties properties = readProperties  file: file_path
+	Enumeration e = properties.keys();
+	while (e.hasMoreElements())
+	{
+		key = e.nextElement();
+		val = properties.get(key);
+		def parameter=[string(name: key, value: val)]
+		allparameters=allparameters+parameter
+		println "Set parameter " + key + " to " + val;
+	}
+	println allparameters
+	return allparameters
+}
+
+def smoke_testing_matrix(){
+    def parallelArgs = [:]
+    def Args_from_property=[]
+    test_env_properties_files = findFiles(glob: 'auto_test_daily_build_env/env/*.property')
+    print test_env_properties_files
+    for(int i = 0; i < test_env_properties_files.size(); i++){
+                def index=i
+                println test_env_properties_files[index].name
+                println test_env_properties_files[index].path
+                Args_from_property[index]=getallparameters(test_env_properties_files[index].path)
+                parallelArgs["Run smoke for: ${test_env_properties_files[index].name}"] = {
+                result = build(
+                        //job: 'STUB_JOB',
+                        job: 'COLLINE_SYSTEM_TEST_ENGINE',
+                        //job: 'COLLINE_DEPLOY',
+                        wait: true,
+                        propagate: false,
+                        parameters: Args_from_property[index] +
+                        [$class: 'StringParameterValue', name: 'SERVER_COUNT', value: env.test_concurrency] +
+                        [$class: 'StringParameterValue', name: 'SeleniumScriptBranch', value: env.build_branch] +
+                        [$class: 'StringParameterValue', name: 'CucumberTags', value: env.CucumberTags] +
+                        [$class: 'StringParameterValue', name: 'CollineInstallerPath', value: env.installer_path_in_s3]
+                        )
+                }
+               
+            }
+    parallel(parallelArgs)
+    if (result.result != 'SUCCESS') {
+        currentBuild.result = result.result
+        }
+    }

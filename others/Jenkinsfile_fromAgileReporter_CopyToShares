@@ -1,0 +1,87 @@
+S3_BUCKET = 'lrmtech-deployment-ireland'
+NAS_RELEASE_PATH = '/NAS/REPORTERPortal/CandidateReleases'
+
+pipeline {
+    agent { label 'master' }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    parameters {
+        string(
+                name: 'VERSION_PATH',
+                defaultValue: '',
+                description:
+                        """
+                            <h3>The version path where the candidate release files are stored (i.e. 1.15.7/b20).</h3>
+
+                            <p>Used to select the dir when downloading from S3: <code>$S3_BUCKET/\$MAJOR_VERSION/\$BUILD_NUMBER</code></p> 
+                        """
+        )
+        string(
+                name: 'FILE_NAME',
+                defaultValue: '',
+                description:
+                        """
+                            <h3>The name of the candidate release file (i.e. AgileREPORTER-1.15.7-b18.jar).<h3>
+                            
+                            <p>Used to select the file to download from the S3 dir: <code>$S3_BUCKET/\$MAJOR_VERSION/\$BUILD_NUMBER/\$FILE_NAME</code></p>
+                        """
+        )
+    }
+
+    stages {
+        stage('Download from S3') {
+            steps {
+                downloadCandidateRelease(params)
+            }
+        }
+        stage('Copy to Shanghai share') {
+            steps {
+                copyToShanghaiShare(params)
+            }
+        }
+    }
+    post {
+        always {
+            deleteDir()
+        }
+        failure {
+            notifyFailure()
+        }
+    }
+}
+
+void downloadCandidateRelease(Map params) {
+    def s3InstallerPath = "AgileREPORTER/Releases/CandidateReleases/${params.VERSION_PATH}/${params.FILE_NAME}"
+
+    echo "Download [${params.FILE_NAME}] from [$S3_BUCKET/$s3InstallerPath]"
+
+    withAWS(credentials: 'aws') {
+        s3Download(
+                bucket: S3_BUCKET,
+                path: s3InstallerPath,
+                file: params.FILE_NAME,
+                force: true
+        )
+    }
+}
+
+void copyToShanghaiShare(Map params) {
+    def shaSharePath = "$NAS_RELEASE_PATH/AR-${params.VERSION_PATH}"
+
+    echo "Copy [${params.FILE_NAME}] to [$shaSharePath]"
+
+    sh "mkdir -p $shaSharePath"
+    sh "cp -f ${params.FILE_NAME} $shaSharePath"
+}
+
+void notifyFailure() {
+    office365ConnectorSend(
+            color: '#FF4136',
+            message: '> Failed copying candidate release to shared drive',
+            status: '**FAILED**',
+            webhookUrl: 'https://outlook.office.com/webhook/edee457e-63bc-4e9d-8eca-750bbaa3045c@4a78f2c0-297f-426d-b09f-5986924d38e7/JenkinsCI/d548703657364e68ac1e88c175de357f/b07b3f9f-454c-4bc8-b523-7b8a3fabf234'
+    )
+}
