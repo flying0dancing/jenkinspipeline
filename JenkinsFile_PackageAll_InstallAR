@@ -37,7 +37,7 @@ pipeline {
 		}
         stage('install ar platform on linux'){
            steps{
-               installAROcelot(ARProject_Prefix,AROcelot_Prop_Suffix)
+               opAROcelot(ARProject_Prefix,AROcelot_Prop_Suffix)
 			}    
         }
         stage('install ar product package on linux'){
@@ -135,7 +135,6 @@ void packageARProduct(projectFolder,packageBuildNumber){
     sh (
         '''
 			cd ci-script
-			echo java -jar testudo.jar -Dproject='''+projectFolder+''' -Did=* -Dproc=2 -DrunOnJenkins -Drelease
 			java -jar testudo.jar -Dproject='''+projectFolder+''' -Did=* -Dproc=2 -DrunOnJenkins -Drelease='''+packageBuildNumber+'''
 		'''
         )
@@ -170,7 +169,7 @@ void packageARProduct(projectFolder,packageBuildNumber){
             }
 		}
 	}else{
-	    echo "there is no packages, generated with failures."
+	    error "there is no packages, generated with failures."
 	}
 }
 
@@ -214,7 +213,7 @@ void downloadARInstaller(projectFolder){
             echo "downloaded Agile Reporter jar completely."
     }
     }else{
-	    echo "there is no packages existed in bucket server, please check your ar.installer.version in ${ARProject_Properties}."
+	    error "there is no packages existed in bucket server, please check your ar.installer.version in ${ARProject_Properties}."
 	}
 	
 }
