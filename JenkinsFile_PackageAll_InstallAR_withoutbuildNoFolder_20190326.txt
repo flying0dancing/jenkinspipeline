@@ -26,7 +26,7 @@ pipeline {
 		stage('build package'){
 			steps{
 				echo "branch number: ${env.BUILD_NUMBER}"
-				packageARProduct(ARProject_Prefix,'b'+env.BUILD_NUMBER)
+				packageARProduct(ARProject_Prefix,env.BUILD_NUMBER)
 			}
 		}
 		stage('download ar installer'){
@@ -37,11 +37,15 @@ pipeline {
 		}
         stage('install ar platform on linux'){
            steps{
-               installAROcelot(ARProject_Prefix,AROcelot_Prop_Suffix)
+               echo "branch number: ${env.BUILD_NUMBER}"
+               //installAROcelot(ARProject_Prefix,AROcelot_Prop_Suffix)
+               opAROcelot(ARProject_Prefix,AROcelot_Prop_Suffix)
+               //opAROcelot(ARProject_Prefix,'_upgrade_ocelot.properties')
 			}    
         }
         stage('install ar product package on linux'){
            steps{
+               echo "branch number: ${env.BUILD_NUMBER}"
 			   installAllARProducts(ARProject_Prefix,env.BUILD_NUMBER,getAROcelotProperty(ARProject_Prefix,'ocelot.install.path',AROcelot_Prop_Suffix))
 			   linkARprojectDID(ARProject_Prefix,ARProject_Prefix,getAROcelotProperty(ARProject_Prefix,'ocelot.install.path',AROcelot_Prop_Suffix),DID_Prop_Suffix)
 			}    
@@ -127,16 +131,13 @@ String getVersionOfARProductFromManifest(manifestFullPath){
 	return version_APRroduct_Pacakge
 }
 
-/**
-* package all products in projectFolder, packageBuildNumber like b1,b2,b3...,b290,..
-*/
 void packageARProduct(projectFolder,packageBuildNumber){
     def productVersionFolder
     sh (
         '''
 			cd ci-script
 			echo java -jar testudo.jar -Dproject='''+projectFolder+''' -Did=* -Dproc=2 -DrunOnJenkins -Drelease
-			java -jar testudo.jar -Dproject='''+projectFolder+''' -Did=* -Dproc=2 -DrunOnJenkins -Drelease='''+packageBuildNumber+'''
+			java -jar testudo.jar -Dproject='''+projectFolder+''' -Did=* -Dproc=2 -DrunOnJenkins -Drelease=b'''+packageBuildNumber+'''
 		'''
         )
 	
@@ -153,20 +154,20 @@ void packageARProduct(projectFolder,packageBuildNumber){
 			def version_APRroduct_Pacakge=getVersionOfARProductFromManifest(manifestFiles[festIndex].path)
 			def files = findFiles(glob: productPath+'/*'+version_APRroduct_Pacakge+'*') 
 	        for(int index=0;index<files.size();index++){
-	            echo "transfer ${files[index].name} to folder $productVersionFolder/$packageBuildNumber"
-	            sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'mkdir -p '''+arproduct_repo_linux+productVersionFolder+'''/'''+packageBuildNumber+'''' ''')
-	            def fileExisted=sh(returnStdout: true, script: '''ssh '''+local_linux+''' '[ -e '''+arproduct_repo_linux+productVersionFolder+'/'+packageBuildNumber+'/'+files[index].name+''' ]; echo $?' ''').trim()
+	            echo "transfer ${files[index].name} to folder $productVersionFolder"
+	            sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'mkdir -p '''+arproduct_repo_linux+productVersionFolder+'''' ''')
+	            def fileExisted=sh(returnStdout: true, script: '''ssh '''+local_linux+''' '[ -e '''+arproduct_repo_linux+productVersionFolder+'/'+files[index].name+''' ]; echo $?' ''').trim()
 	            if(fileExisted=='0'){
 	                echo "Agile Reporter Product Package already exists.No need to download again."
 	            }else{
-	                sh( returnStatus: true, script: 'scp '+files[index].path+' '+local_linux+':'+arproduct_repo_linux+productVersionFolder+'/'+packageBuildNumber+'/'+files[index].name)
+	                sh( returnStatus: true, script: 'scp '+files[index].path+' '+local_linux+':'+arproduct_repo_linux+productVersionFolder+'/'+files[index].name)
 	            }
 	        }
 	        //files.each{sh( returnStatus: true, script: 'scp '+it.path+' '+local_linux+':'+arproduct_repo_linux+productVersionFolder+'/'+it.name)}
             echo "upload product package to S3"
             withAWS(credentials: 'aws') {
                 echo """${files[0].name}, ${files[0].path}, ${files[0].directory}, ${files[0].length}, ${files[0].lastModified}"""
-                files.each{s3Upload( bucket:s3_bucket, path:"arproduct/${projectFolder}/CandidateReleases/${productVersionFolder}/${packageBuildNumber}/${it.name}",includePathPattern:"${it.path}")}
+                files.each{s3Upload( bucket:s3_bucket, path:"arproduct/${projectFolder}/CandidateReleases/${productVersionFolder}/${it.name}",includePathPattern:"${it.path}")}
             }
 		}
 	}else{
@@ -237,10 +238,6 @@ String getAROcelotProperty(projectFolder,keystr,arocelot_suffix_prop){
 	return returnValue
 }
 
-/***
-*install ar platform part, arguments: projectName, ocelot properties's name suffix '_new_ocelot.properties'
-
-*/
 void installAROcelot(projectFolder,arocelot_suffix_prop){
 	def local_linux_citool='repository/ci-tool/'
 	def local_linux=getSomeProperties(projectFolder,'local.linux')
@@ -248,8 +245,6 @@ void installAROcelot(projectFolder,arocelot_suffix_prop){
 	def ar_repo_linux=getSomeProperties(projectFolder,'ar.repo.linux')
 	def arInstallerVersion=getSomeProperties(projectFolder,'ar.installer.version')
 	def mainArInstallerVersion=arInstallerVersion[0..arInstallerVersion.indexOf("-b")-1]
-	def arBuildNumber=arInstallerVersion[arInstallerVersion.indexOf("b")..-1]
-	echo "Agile Reporter need to install(new) version: "+arInstallerVersion
 	//transfter impdp_and_expdp_shell to local db server
 	def local_db_user='/home/'+local_db_oracle[0..local_db_oracle.indexOf("@")-1]
 	sh( returnStatus: true, script: 'scp -r ci-script/impdp_and_expdp_shell '+local_db_oracle+':'+local_db_user)
@@ -276,15 +271,69 @@ void installAROcelot(projectFolder,arocelot_suffix_prop){
 	//copy ocelot.properties to local ocelot folder
 	sh( returnStatus: true, script: '''ssh '''+local_linux+''' 'cp '''+local_linux_citool+projectFolder+arocelot_suffix_prop+''' '''+local_linux_ocelotpath+''' ' ''')
 	//copy ar jar to local ocelot folder
-	sh( returnStatus: true, script: '''ssh '''+local_linux+''' 'cp '''+ar_repo_linux+mainArInstallerVersion+'''/'''+arBuildNumber+'''/AgileREPORTER-'''+arInstallerVersion+'''.jar '''+local_linux_ocelotpath+''' ' ''')
+	sh( returnStatus: true, script: '''ssh '''+local_linux+''' 'cp '''+ar_repo_linux+mainArInstallerVersion+'''/AgileREPORTER-'''+arInstallerVersion+'''.jar '''+local_linux_ocelotpath+''' ' ''')
 	//sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'chmod a-x '''+local_linux_ocelotpath+'''/*.*' ''')
-	
+	sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'sh '''+local_linux_citool+'''RemoteInstall.sh -help' ''')
+	//sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'sh '''+local_linux_citool+'''RemoteInstall.sh '''+local_linux_ocelotpath+''' 0 '''+ar_repo_linux+getProductVersionFolder(projectFolder)+'''/AgileREPORTER-'''+arInstallerVersion+'''.jar '''+local_linux_citool+projectFolder+'''_ocelot.properties' ''')
+
 	sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'sh RemoteInstall.sh '''+local_linux_ocelotpath+''' 0 AgileREPORTER-'''+arInstallerVersion+'''.jar '''+projectFolder+arocelot_suffix_prop+'''' ''')
 	
 }
 
+void installAllARProducts(projectFolder,buildNumber,local_linux_ocelotpath){
+	def local_linux=getSomeProperties(projectFolder,'local.linux')
+	//def local_linux_ocelotpath=getAROcelotProperty(projectFolder,'ocelot.install.path',arocelot_suffix_prop)
+	def productVersionFolder=getProductVersionFolder(projectFolder)
+	def arproduct_repo_linux=getSomeProperties(projectFolder,'arproduct.repo.linux')+projectFolder+'/candidate-release/'
+	//copy ar product to local ocelot folder
+	//find /home/test/repository/ARProduct/hkma/candidate-release/5.29.0 -type f -name *b3.zip | xargs cp -t PIPEAR4HKMA
+	def fileExisted=sh( returnStatus: true, script: '''ssh '''+local_linux+''' 'find '''+arproduct_repo_linux+productVersionFolder+''' -type f -name *'''+buildNumber+'''.zip | xargs cp -t '''+local_linux_ocelotpath+''' ' ''')
+	if(fileExisted==0){
+		//copy RemoteInstallARProducts.sh to local server
+	    def local_linux_user='/home/'+local_linux[0..local_linux.indexOf("@")-1]
+	    sh( returnStatus: true, script: 'scp ci-script/RemoteInstallARProducts.sh '+local_linux+':'+local_linux_user)
+	    sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'chmod u+x RemoteInstallARProducts.sh' ''')
+	    sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'sh RemoteInstallARProducts.sh '''+local_linux_ocelotpath+''' *'''+buildNumber+'''.zip ' ''')
+	}else{
+	    echo "Agile Reporter Product Packages don't exist."
+	} 
+	
+}
+
+
+void linkARprojectDID(projectFolder,productName,local_linux_ocelotpath,did_prop_suffix){
+	def continue_status0='RemoteInstall_0.tmp'
+	def continue_status1='RemoteInstall_1.tmp'
+	def local_linux=getSomeProperties(productName,'local.linux')
+	def flag=sh(returnStatus: true, script: '''ssh '''+local_linux+''' 'cat '''+local_linux_ocelotpath+'''/'''+continue_status1+''' | grep fail' ''')
+	if(flag==1){
+		def local_linux_citool='repository/ci-tool/'
+		def productVersionFolder=getProductVersionFolder(productName)
+		def data_DIDpro=productName.toUpperCase()+'oracleData'+did_prop_suffix
+		def system_DIDpro=productName.toUpperCase()+'oracleSystem'+did_prop_suffix
+
+		def ce_productVersion=getVersionOfARProductFromManifest(projectFolder+'/ce_'+productName+ARProduct_Manifest)
+		//copy aliasinfo.properties to local ocelot folder
+		sh( returnStatus: true, script: '''ssh '''+local_linux+''' 'cp '''+local_linux_citool+productName.toUpperCase()+'''*'''+did_prop_suffix+''' '''+local_linux_ocelotpath+'''/bin ' ''')
+		//copy RemoteInstall.sh to local server
+		def local_linux_user='/home/'+local_linux[0..local_linux.indexOf("@")-1]
+		sh( returnStatus: true, script: 'scp ci-script/RemoteInstall.sh '+local_linux+':'+local_linux_user)
+		sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'chmod u+x RemoteInstall.sh' ''')
+		sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'sh RemoteInstall.sh '''+local_linux_ocelotpath+''' 1 '''+ data_DIDpro+''' CE_'''+productName.toUpperCase()+''' '''+ ce_productVersion+''' "STB CORE Data:STB Data '''+productName.toUpperCase()+'''" ' ''')
+		flag=sh(returnStatus: true, script: '''ssh '''+local_linux+''' 'cat '''+local_linux_ocelotpath+'''/'''+continue_status1+''' | grep fail' ''')
+		if(flag==1){
+			sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'sh RemoteInstall.sh '''+local_linux_ocelotpath+''' 1 '''+ system_DIDpro+''' CE_'''+productName.toUpperCase()+''' '''+ ce_productVersion+''' "STB Work:STB System:STB System '''+productName.toUpperCase()+'''" ' ''')
+		}else{
+			error continue_status1+" contains fail, cannot continue to configure."
+		}
+	
+	}else{
+		error continue_status1+" contains fail, cannot continue to configure."
+	}
+}
+
 /***
-*install or upgrade ar platform part, arguments: projectName, ocelot properties's name suffix '_upgrade_ocelot.properties' or '_new_ocelot.properties'
+install or upgrade ar platform part, arguments: projectName, ocelot properties's name suffix '_upgrade_ocelot.properties' or '_new_ocelot.properties'
 */
 void opAROcelot(projectFolder,arocelot_suffix_prop){
 	//def ocelot_prop='_upgrade_ocelot.properties'
@@ -294,7 +343,6 @@ void opAROcelot(projectFolder,arocelot_suffix_prop){
 	def ar_repo_linux=getSomeProperties(projectFolder,'ar.repo.linux')
 	def arInstallerVersion=getSomeProperties(projectFolder,'ar.installer.version')
 	def mainArInstallerVersion=arInstallerVersion[0..arInstallerVersion.indexOf("-b")-1]
-	def arBuildNumber=arInstallerVersion[arInstallerVersion.indexOf("b")..-1]
 	def installflag=false
 	//transfer ocelot properties to workspace for getting properties
 	sh( returnStatus: true, script: 'scp '+local_linux+':'+local_linux_citool+projectFolder+arocelot_suffix_prop+' '+env.WORKSPACE)
@@ -337,82 +385,9 @@ void opAROcelot(projectFolder,arocelot_suffix_prop){
 		//copy ocelot.properties to local ocelot folder
 		sh( returnStatus: true, script: '''ssh '''+local_linux+''' 'cp '''+local_linux_citool+projectFolder+arocelot_suffix_prop+''' '''+local_linux_ocelotpath+''' ' ''')
 		//copy ar jar to local ocelot folder
-		sh( returnStatus: true, script: '''ssh '''+local_linux+''' 'cp '''+ar_repo_linux+mainArInstallerVersion+'''/'''+arBuildNumber+'''/AgileREPORTER-'''+arInstallerVersion+'''.jar '''+local_linux_ocelotpath+''' ' ''')
-		sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'sh '''+local_linux_user+'''/RemoteInstall.sh -help' ''')
+		sh( returnStatus: true, script: '''ssh '''+local_linux+''' 'cp '''+ar_repo_linux+mainArInstallerVersion+'''/AgileREPORTER-'''+arInstallerVersion+'''.jar '''+local_linux_ocelotpath+''' ' ''')
+		sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'sh '''+local_linux_citool+'''RemoteInstall.sh -help' ''')
 		sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'sh RemoteInstall.sh '''+local_linux_ocelotpath+''' 0 AgileREPORTER-'''+arInstallerVersion+'''.jar '''+projectFolder+arocelot_suffix_prop+'''' ''')
-		def flag=sh(returnStatus: true, script: '''ssh '''+local_linux+''' 'cat '''+local_linux_ocelotpath+'''/RemoteInstall_0.tmp | grep fail' ''')
-		if(flag==1){//RemoteInstall_0.tmp cannot exist or RemoteInstall_0.tmp only contains pass
-			echo "Agile Reporter Platform installed pass"
-		}else{
-			error "Agile Reporter Platform installed fail"
-		}
-
 	}
 	
-}
-
-/***
-*install arproduct packages part, arguments: projectName, buildNumber like env.BUILD_NUMBER, ocelotpath 
-*if RemoteInstall_0.tmp contains fail, it will terminate.
-*It installs products which name suffix with buildNumber+'.zip' under <projectFolder>/candidate-release/<productVersionFolder>/
-*/
-void installAllARProducts(projectFolder,buildNumber,local_linux_ocelotpath){
-	def local_linux=getSomeProperties(projectFolder,'local.linux')
-	def flag=sh(returnStatus: true, script: '''ssh '''+local_linux+''' 'cat '''+local_linux_ocelotpath+'''/RemoteInstall_0.tmp | grep fail' ''')
-	if(flag==1){//RemoteInstall_0.tmp cannot exist or RemoteInstall_0.tmp only contains pass
-		//def local_linux_ocelotpath=getAROcelotProperty(projectFolder,'ocelot.install.path',arocelot_suffix_prop)
-		def productVersionFolder=getProductVersionFolder(projectFolder)
-		def arproduct_repo_linux=getSomeProperties(projectFolder,'arproduct.repo.linux')+projectFolder+'/candidate-release/'
-		//copy ar product to local ocelot folder
-		//find /home/test/repository/ARProduct/hkma/candidate-release/5.29.0 -type f -name *b3.zip | xargs cp -t PIPEAR4HKMA
-		def fileExisted=sh( returnStatus: true, script: '''ssh '''+local_linux+''' 'find '''+arproduct_repo_linux+productVersionFolder+''' -type f -name *'''+buildNumber+'''.zip | xargs cp -t '''+local_linux_ocelotpath+''' ' ''')
-		if(fileExisted==0){
-			//copy RemoteInstallARProducts.sh to local server
-	    	def local_linux_user='/home/'+local_linux[0..local_linux.indexOf("@")-1]
-	    	sh( returnStatus: true, script: 'scp ci-script/RemoteInstallARProducts.sh '+local_linux+':'+local_linux_user)
-	    	sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'chmod u+x RemoteInstallARProducts.sh' ''')
-	    	sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'sh RemoteInstallARProducts.sh '''+local_linux_ocelotpath+''' *'''+buildNumber+'''.zip ' ''')
-		}else{
-	    	error "Agile Reporter Product Packages don't exist."
-		} 
-	}else{
-		error continue_status0+" contains fail, cannot continue to install products."
-	}
-	
-	
-}
-/***
-*config DID part, arguments: projectName, productName, ocelotpath, DID's properties's name suffix like 'aliasinfo.properties' 
-*use common arguments: ARProduct_Manifest
-*if RemoteInstall_1.tmp contains fail, it will terminate.
-*/
-void linkARprojectDID(projectFolder,productName,local_linux_ocelotpath,did_prop_suffix){
-	//def continue_status0='RemoteInstall_0.tmp'
-	def continue_status1='RemoteInstall_1.tmp'
-	def local_linux=getSomeProperties(productName,'local.linux')
-	def flag=sh(returnStatus: true, script: '''ssh '''+local_linux+''' 'cat '''+local_linux_ocelotpath+'''/'''+continue_status1+''' | grep fail' ''')
-	if(flag==1){//RemoteInstall_1.tmp cannot exist or RemoteInstall_1.tmp only contains pass
-		def local_linux_citool='repository/ci-tool/'
-		def productVersionFolder=getProductVersionFolder(productName)
-		def data_DIDpro=productName.toUpperCase()+'oracleData'+did_prop_suffix
-		def system_DIDpro=productName.toUpperCase()+'oracleSystem'+did_prop_suffix
-
-		def ce_productVersion=getVersionOfARProductFromManifest(projectFolder+'/ce_'+productName+ARProduct_Manifest)
-		//copy aliasinfo.properties to local ocelot folder
-		sh( returnStatus: true, script: '''ssh '''+local_linux+''' 'cp '''+local_linux_citool+productName.toUpperCase()+'''*'''+did_prop_suffix+''' '''+local_linux_ocelotpath+'''/bin ' ''')
-		//copy RemoteInstall.sh to local server
-		def local_linux_user='/home/'+local_linux[0..local_linux.indexOf("@")-1]
-		sh( returnStatus: true, script: 'scp ci-script/RemoteInstall.sh '+local_linux+':'+local_linux_user)
-		sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'chmod u+x RemoteInstall.sh' ''')
-		sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'sh RemoteInstall.sh '''+local_linux_ocelotpath+''' 1 '''+ data_DIDpro+''' CE_'''+productName.toUpperCase()+''' '''+ ce_productVersion+''' "STB CORE Data:STB Data '''+productName.toUpperCase()+'''" ' ''')
-		flag=sh(returnStatus: true, script: '''ssh '''+local_linux+''' 'cat '''+local_linux_ocelotpath+'''/'''+continue_status1+''' | grep fail' ''')
-		if(flag==1){
-			sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'sh RemoteInstall.sh '''+local_linux_ocelotpath+''' 1 '''+ system_DIDpro+''' CE_'''+productName.toUpperCase()+''' '''+ ce_productVersion+''' "STB Work:STB System:STB System '''+productName.toUpperCase()+'''" ' ''')
-		}else{
-			error continue_status1+" contains fail, cannot continue to configure."
-		}
-	
-	}else{
-		error continue_status1+" contains fail, cannot continue to configure."
-	}
 }
