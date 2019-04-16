@@ -1,0 +1,546 @@
+#!groovy
+ARProject_Prefix=getprojectFolder(env.JOB_NAME)
+ARProject_Properties='package.properties'
+ARProduct_Manifest='/src/manifest.xml'
+AROcelot_Prop_Suffix='_new_ocelot.properties'
+DID_Prop_Suffix='aliasinfo.properties'
+ARProject_Test_Properties='test.properties'
+
+server = Artifactory.server '-2131115395@1455437299997'
+rtMaven = Artifactory.newMavenBuild()
+rtMaven.tool = 'mvn-3.3.9' // Tool name from Jenkins configuration
+rtMaven.deployer( releaseRepo: 'libs-release-local', snapshotRepo: 'libs-snapshot-local', server: server)
+rtMaven.resolver( releaseRepo: 'libs-release', snapshotRepo: 'libs-snapshot', server: server)
+rtMaven.deployer.deployArtifacts = false // Disable artifacts deployment during Maven run
+buildInfo = Artifactory.newBuildInfo()
+
+pipeline {
+    agent { label 'PRODUCT-CI-TEST' }
+    options {
+        timeout(time: 300, unit: 'MINUTES') 
+    }
+    
+    stages {
+        stage('checkout'){
+			steps{
+				echo "start job ${JOB_URL}"
+				echo "branch number: ${env.BUILD_NUMBER}"
+				checkoutARProduct(ARProject_Prefix)
+			}
+		}
+		stage('download ar installer'){
+			steps{
+				echo "download agile reporter installer"
+				downloadARInstaller(ARProject_Prefix)
+			}
+		}
+        stage('install ar platform on linux'){
+           steps{
+			   echo "install agile reporter on local linux"
+               opAROcelot(ARProject_Prefix,ARProject_Prefix+getTestProperties(ARProject_Prefix,'env.ocelot.prop.suffix'))
+			}    
+        }
+        stage('install ar product package on linux'){
+           steps{
+			   echo "install ar product package on local linux"
+			   installAllARProducts(ARProject_Prefix,getTestProperties(ARProject_Prefix,''),getAROcelotProperty(ARProject_Prefix+getTestProperties(ARProject_Prefix,'env.ocelot.prop.suffix'),'ocelot.install.path'))
+			   linkARprojectDID(ARProject_Prefix,ARProject_Prefix,getAROcelotProperty(ARProject_Prefix+getTestProperties(ARProject_Prefix,'env.ocelot.prop.suffix'),'ocelot.install.path'),DID_Prop_Suffix)
+			}    
+        }
+    }
+}
+
+String getVersionOfArInstaller(productPrefix){
+    def arInstallerVersion = sh (
+        script: '''awk -F '=' /^ar.installer.version[^.]/'{print $2}' '''+productPrefix+'''/'''+ARProduct_Properties,
+        returnStdout: true
+        ).trim()
+    echo "Agile reporter installer version: ${arInstallerVersion}"
+	return arInstallerVersion
+}
+
+
+String getPackProperties(projectFolder,keystr){
+	return getSomeProperties(projectFolder+'/'+ARProject_Properties,keystr)
+}
+
+String getTestProperties(projectFolder,keystr){
+	return getSomeProperties(projectFolder+'/'+ARProject_Test_Properties,keystr)
+}
+
+String getSomeProperties(propFile,keystr){
+	def files =findFiles(glob: '**/'+propFile)
+	def returnValue=''
+	def props
+	for(int index=0;index<files.size();index++){
+		props = readProperties interpolate: true, file: files[index].path
+		props.each{
+			if(it.key==keystr){
+				//println(it.key + " = " + it.value)
+				returnValue=it.value
+				return returnValue
+			}
+		}
+	}
+	return returnValue
+}
+
+def getExternalProjsFromJson(projectFolder){
+	def files =findFiles(glob: '**/'+projectFolder+'/**/testudo.json')
+	def returnArr=[]
+	def cisettings
+	def zipset
+	def externalProjs
+	for(int index=0;index<files.size();index++){
+		cisettings = readJSON file: files[index].path
+		for(int i=0;i<cisettings.size();i++){
+			zipset=cisettings[i].zipSettings
+			if(zipset){
+			    //println(zipset)
+				externalProjs=zipset.externalProjects
+				if(externalProjs){
+					for(int j=0;j<externalProjs.size();j++){
+						def flag=returnArr.find{it->it==externalProjs[j].project}
+						//println("${externalProjs[j].project}")
+						if(!flag){
+							returnArr+=externalProjs[j].project
+						}
+						
+				 	}
+				}
+				
+			}
+			
+		}
+	}
+	println "external projects:${returnArr}"
+	return returnArr
+}
+
+String getprojectFolder(jobName){
+    return jobName[0..jobName.indexOf("_")-1]
+}
+
+String getProductVersionFolder(projectName){
+    def version_APRroduct_Pacakge = sh (
+        script: '''awk -F '[<>]' /implementationVersion/'{print $3}' '''+projectName+'''/'''+projectName+ARProduct_Manifest,
+        returnStdout: true
+        ).trim()
+	def versionPattern='(\\d+\\.){2,}\\d+'
+	def versionMatcher=(version_APRroduct_Pacakge=~versionPattern)
+	versionMatcher.matches()
+	assert version_APRroduct_Pacakge=~versionPattern
+	version_APRroduct_Pacakge=''+versionMatcher[0][0]
+	versionMatcher=null
+    echo "main version of ar product pacakge: ${version_APRroduct_Pacakge}"
+	return version_APRroduct_Pacakge
+}
+
+String getVersionOfARProductFromManifest(manifestFullPath){
+    def version_APRroduct_Pacakge = sh (
+        script: '''awk -F '[<>]' /implementationVersion/'{print $3}' '''+manifestFullPath,
+        returnStdout: true
+        ).trim()
+    echo "version of ar product pacakge: ${version_APRroduct_Pacakge}"
+	return version_APRroduct_Pacakge
+}
+
+void checkoutARProduct(projectFolder){
+    checkout([$class: 'GitSCM', branches: [[name: '*/master']], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'CleanBeforeCheckout'], [$class: 'RelativeTargetDirectory', relativeTargetDir: "${projectFolder}"]], submoduleCfg: [], userRemoteConfigs: [[credentialsId: '46afdff1-cdd3-4098-b8af-d904b4d298aa', url: "ssh://git@bitbucket.lombardrisk.com:7999/cprod/${projectFolder}.git"]]])
+    def externalProjs=getExternalProjsFromJson(projectFolder)
+	if(externalProjs){
+		for(int i=0;i<externalProjs.size();i++){
+			checkout([$class: 'GitSCM', branches: [[name: '*/master']], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'CleanBeforeCheckout'], [$class: 'RelativeTargetDirectory', relativeTargetDir: "${projectFolder}xbrl"]], submoduleCfg: [], userRemoteConfigs: [[credentialsId: '46afdff1-cdd3-4098-b8af-d904b4d298aa', url: "ssh://git@bitbucket.lombardrisk.com:7999/cprod/${externalProjs[i]}.git"]]])
+		}
+	}
+}
+
+/**
+* package all products in projectFolder, packageBuildNumber like b1,b2,b3...,b290,..
+*/
+void packageARProduct(projectFolder,packageBuildNumber){
+    def productVersionFolder
+    dir(projectFolder){
+      rtMaven.run pom: 'pom.xml', goals: 'clean package -U -DskipITs -DskipTests -Dproduct.build.number='+packageBuildNumber, buildInfo: buildInfo
+    }
+}
+
+
+void uploadARProduct(projectFolder,packageBuildNumber){
+    def productVersionFolder=getProductVersionFolder(projectFolder)
+	def s3_bucket=getPackProperties(projectFolder,'s3.bucket')
+	def local_linux=getPackProperties(projectFolder,'local.linux')
+	def arproduct_repo_linux=getPackProperties(projectFolder,'arproduct.repo.linux')+projectFolder+'/candidate-release/'
+	def manifestFiles = findFiles(glob: '**/'+projectFolder+'/*/target/**'+ARProduct_Manifest)
+	productVersionFolder=productVersionFolder+'/'+packageBuildNumber
+	if(manifestFiles){
+		for(int festIndex=0;festIndex<manifestFiles.size();festIndex++){
+		    def productPath=manifestFiles[festIndex].path.replaceAll(ARProduct_Manifest,'')
+			echo "product package path: "+productPath.replaceAll('/src','')
+			def version_APRroduct_Pacakge=getVersionOfARProductFromManifest(manifestFiles[festIndex].path)
+			def files = findFiles(glob: productPath+'/*'+version_APRroduct_Pacakge+'*') 
+			if(local_linux){
+				sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'mkdir -p '''+arproduct_repo_linux+productVersionFolder+'''' ''')
+				for(int index=0;index<files.size();index++){
+	            	echo "transfer ${files[index].name} to folder $productVersionFolder"
+	            	sh( returnStatus: true, script: 'scp '+files[index].path+' '+local_linux+':'+arproduct_repo_linux+productVersionFolder+'/'+files[index].name)
+	        	}
+			}
+	        withAWS(credentials: 'aws') {
+                files.each{s3Upload( bucket:s3_bucket, path:"arproduct/${projectFolder}/CandidateReleases/${productVersionFolder}/${it.name}",includePathPattern:"${it.path}")}
+            }
+		}
+	}else{
+	    error "there is no packages, generated with failures."
+	}
+}
+
+String getAROcelotProperty(propFile,keystr){
+	def files =findFiles(glob: '**/'+propFile)
+	def returnValue=''
+	def props
+	for(int index=0;index<files.size();index++){
+		props = readProperties interpolate: true, file: files[index].path
+		props.each{
+			if(it.key==keystr){
+				println(it.key + " = " + it.value)
+				returnValue=it.value
+				return returnValue
+			}
+		}
+	}
+	return returnValue
+}
+
+
+/***
+*new install or upgrade ar platform part, arguments: projectName, ocelot properties's name like 'hkma_upgrade_ocelot.properties' 'hkma_new_ocelot.properties'
+* use ocelot.user.password= to judged new install or upgrade
+*/
+void opAROcelot(projectFolder,arocelot_install_prop){
+
+	def arInstallerVersion=getPackProperties(projectFolder,'ar.installer.version')
+	opAROcelot(projectFolder,arInstallerVersion,arocelot_install_prop)	
+}
+
+
+void installAllARProducts(projectFolder,buildNumber,local_linux_ocelotpath){
+	def productVersionFolder=getProductVersionFolder(projectFolder)
+	installAllARProducts(projectFolder,productVersionFolder,buildNumber,local_linux_ocelotpath)
+}
+
+/***
+*install arproduct packages part, arguments: projectName, buildNumber like env.BUILD_NUMBER, ocelotpath 
+*if RemoteInstall_0.tmp contains fail, it will terminate.
+*It installs products which name suffix with buildNumber+'.zip' under <projectFolder>/candidate-release/<productVersionFolder>/
+*/
+void installAllARProducts(projectFolder,productVersionFolder,buildNumber,local_linux_ocelotpath){
+	def local_linux=getPackProperties(projectFolder,'local.linux')
+	def flag=sh(returnStatus: true, script: '''ssh '''+local_linux+''' 'cat '''+local_linux_ocelotpath+'''/RemoteInstall_0.tmp | grep fail' ''')
+	if(flag==1){//RemoteInstall_0.tmp cannot exist or RemoteInstall_0.tmp only contains pass
+		def arproduct_repo_linux=getPackProperties(projectFolder,'arproduct.repo.linux')+projectFolder+'/candidate-release/'
+		//copy ar product to local ocelot folder
+		//find /home/test/repository/ARProduct/hkma/candidate-release/5.29.0 -type f -name *b3.zip | xargs cp -t PIPEAR4HKMA
+		def fileExisted=sh( returnStatus: true, script: '''ssh '''+local_linux+''' 'find '''+arproduct_repo_linux+productVersionFolder+''' -type f -name *'''+buildNumber+'''.zip | xargs cp -t '''+local_linux_ocelotpath+''' ' ''')
+		if(fileExisted==0){
+			//copy RemoteInstallARProducts.sh to local server
+	    	def local_linux_user='/home/'+local_linux[0..local_linux.indexOf("@")-1]
+	    	sh( returnStatus: true, script: 'scp ci-script/RemoteInstallARProducts.sh '+local_linux+':'+local_linux_user)
+	    	sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'chmod u+x RemoteInstallARProducts.sh' ''')
+	    	sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'sh RemoteInstallARProducts.sh '''+local_linux_ocelotpath+''' *'''+buildNumber+'''.zip ' ''')
+		}else{
+	    	error "Agile Reporter Product Packages don't exist."
+		} 
+	}else{
+		error continue_status0+" contains fail, cannot continue to install products."
+	}
+
+}
+/***
+*config DID part, arguments: projectName, productPrefix, ocelotpath, DID's properties's name suffix like 'aliasinfo.properties' 
+*use common arguments: ARProduct_Manifest
+*if RemoteInstall_1.tmp contains fail, it will terminate.
+*/
+void linkARprojectDID(projectFolder,propertiesFileName,productPrefix,productVersion,productPropFileName,productPropAliases,ocelotpath){
+	//def continue_status0='RemoteInstall_0.tmp'
+	def continue_status1='RemoteInstall_1.tmp'
+	def local_linux=getSomeProperties(projectFolder+'/'+propertiesFileName,'local.linux')
+	def flag=sh(returnStatus: true, script: '''ssh '''+local_linux+''' 'cat '''+ocelotpath+'''/'''+continue_status1+''' | grep fail' ''')
+	if(flag==1){//RemoteInstall_1.tmp cannot exist or RemoteInstall_1.tmp only contains pass
+		
+		//copy aliasinfo.properties to local ocelot folder
+		sh( returnStatus: true, script: '''ssh 'find '''+env.WORKSPACE+'''/test/ -type f -name '''+productPropFileName+''' '''+local_linux+''':'''+ocelotpath+''' ' ''')
+		//copy RemoteInstall.sh to local server
+		def local_linux_user='/home/'+local_linux[0..local_linux.indexOf("@")-1]
+		sh( returnStatus: true, script: 'scp ci-script/RemoteInstall.sh '+local_linux+':'+local_linux_user)
+		sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'chmod u+x RemoteInstall.sh' ''')
+		sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'sh RemoteInstall.sh '''+ocelotpath+''' 1 '''+ productPropFileName+''' '''+productPrefix.toUpperCase()+''' '''+ productVersion+''' '''+productPropAliases+''' ' ''')
+		flag=sh(returnStatus: true, script: '''ssh '''+local_linux+''' 'cat '''+ocelotpath+'''/'''+continue_status1+''' | grep fail' ''')
+		if(flag==1){
+			echo continue_status1+" pass."
+		}else{
+			error continue_status1+" contains fail, cannot continue to configure."
+		}
+	
+	}else{
+		error continue_status1+" contains fail, cannot continue to configure."
+	}
+}
+
+
+def installOcelotJson(projectFolder,propertiesFileName){
+	def jsonFileName=getSomeProperties(projectFolder+'/'+propertiesFileName,'install.product.list')
+	def files=findFiles(glob: '**/'+projectFolder+'/**/'+jsonFileName)
+	def gado
+	def installOcelotPath
+	for(int index=0;index<files.size();index++){
+		gado=readJSON file: files[index].path
+		if(gado.installocelot){
+			opAROcelot(projectFolder,propertiesFileName,gado.installocelot.prefix,gado.installocelot.version,gado.installocelot.props[0].filename)
+		}
+	}
+}
+def installProductsJson(projectFolder,propertiesFileName){
+	def jsonFileName=getSomeProperties(projectFolder+'/'+propertiesFileName,'install.product.list')
+	def files=findFiles(glob: '**/'+projectFolder+'/**/'+jsonFileName)
+	def gado
+	def installProducts
+	def installOcelotPath
+	for(int index=0;index<files.size();index++){
+		gado=readJSON file: files[index].path
+		if(gado.installocelot){
+			echo gado.installocelot.version
+			echo gado.installocelot.props[0].filename
+			installOcelotPath=getAROcelotProperty(gado.installocelot.props[0].filename,'ocelot.install.path')
+		}
+		installProducts=gado.installproducts
+		if(installProducts){
+			for(int i=0;i<installproducts.size();i++){
+				if(installproducts[i].installpath){
+					installOcelotPath=installproducts[i].installpath
+				}
+				if(installOcelotPath){
+					def productVer=installproducts[i].version
+					def buildNumber
+					if(productVer.contains('-b')){
+						productVer=productVer[0..productVer.indexOf('-b')-1)]
+						buildNumber=productVer[productVer.indexOf('b')..-1]
+					}
+					installARProduct(projectFolder,propertiesFileName,installproducts[i].prefix,productVer,buildNumber,installOcelotPath)
+					def props=installProducts[i].props
+					if(props){
+						if(!buildNumber){
+							buildNumber=searchLatestProductBuild(projectFolder,propertiesFileName,installproducts[i].prefix,productVer)
+						}
+						for(int j=0;j<props.size();j++){
+							linkARprojectDID(projectFolder,propertiesFileName,installproducts[i].prefix,productVer+'-'+buildNumber,props[i].filename,props[i].aliases,installOcelotPath)
+						}
+					}
+				}else{
+					error "canot found intsall path in "+jsonFileName+" or ocelot.install.path in ocelot properties" 
+				}
+			}
+		}else{
+			error "canot found intsall products in gado.json"
+		}
+	}
+}
+String searchLatestProductBuild(projectFolder,propertiesFileName,productPrefix,productVersion){
+	def s3_ar_repo='arproduct/'+projectFolder+'/CandidateReleases/'
+	return searchLatestBuildFromS3(s3_ar_repo,projectFolder,propertiesFileName,productPrefix,productVersion)
+}
+String searchLatestBuildFromS3(s3repo,projectFolder,propertiesFileName,productPrefix,productVersion){
+	def buildNumber
+	def downfiles
+	def s3_bucket=getSomeProperties(projectFolder+'/'+propertiesFileName,'s3.bucket')
+	withAWS(credentials: 'aws') {
+		downfiles=s3FindFiles(bucket:s3_bucket, path:s3repo, glob:"**/${productPrefix}*${productVersion}*.lrm")
+    }
+	if(downfiles){
+		def lastIndex=0
+		def lastBuildNumber=downfiles[0].lastModified
+		def downloadFileName=downfiles[index].name
+		for(int index=0;index<downfiles.size();index++){
+			if(lastBuildNumber<downfiles[index].lastModified){
+				lastBuildNumber=downfiles[index].lastModified
+				lastIndex=index
+				downloadFileName=downfiles[index].name
+				echo "download filename"+downloadFileName
+				buildNumber=downloadFileName[downloadFileName.indexOf('b')..-5]
+				break
+			}
+		}
+	}
+	return buildNumber
+}
+String downloadFromS3(s3repo,projectFolder,propertiesFileName,productPrefix,productVersion,buildNumber,downloadPath){
+	def downloadFileName
+    def downfiles
+	def local_linux=getSomeProperties(projectFolder+'/'+propertiesFileName,'local.linux')
+	def s3_bucket=getSomeProperties(projectFolder+'/'+propertiesFileName,'s3.bucket')
+	withAWS(credentials: 'aws') {
+		if(buildNumber){
+			downfiles=s3FindFiles(bucket:s3_bucket, path:s3repo, glob:"**/${productPrefix}*${productVersion}*${buildNumber}.lrm")
+		}else{
+			downfiles=s3FindFiles(bucket:s3_bucket, path:s3repo, glob:"**/${productPrefix}*${productVersion}*.lrm")
+		}
+        //downfiles.each{print "${it.name},${it.path},${it.length},${it.lastModified}"}
+    }
+    if(downfiles){
+		def lastIndex=0
+		def lastBuildNumber=downfiles[0].lastModified
+		downloadFileName=downfiles[index].name
+		for(int index=0;index<downfiles.size();index++){
+			if(lastBuildNumber<downfiles[index].lastModified){
+				lastBuildNumber=downfiles[index].lastModified
+				lastIndex=index
+				downloadFileName=downfiles[index].name
+				echo "download filename"+downloadFileName
+				
+				break
+			}
+		}
+		withAWS(credentials: 'aws') {
+            s3Download(bucket:s3_bucket, path:s3repo+downfiles[lastIndex].path,file:downfiles[lastIndex].path,force:true)
+        }
+        def status=sh( returnStatus: true, script: 'scp '+downfiles[lastIndex].path+' '+local_linux+':'+downloadPath)
+        echo "downloaded Agile Reporter Product completely."
+		
+    }else{
+	    error "there is no packages existed in bucket server, name like ${productPrefix}*${productVersion}*${buildNumber}.lrm"
+	}
+	return downloadFileName
+}
+String downloadARProduct(projectFolder,propertiesFileName,productPrefix,productVersion,buildNumber,downloadPath){
+	def s3_ar_repo='arproduct/'+projectFolder+'/CandidateReleases/'
+    return downloadFromS3(s3_ar_repo,projectFolder,propertiesFileName,productPrefix,productVersion,buildNumber,downloadPath)
+}
+String downloadOcelot(projectFolder,propertiesFileName,productPrefix,productVersion,buildNumber,downloadPath){
+	def s3_ar_repo='AgileREPORTER/Releases/CandidateReleases/'
+    return downloadFromS3(s3_ar_repo,projectFolder,propertiesFileName,productPrefix,productVersion,buildNumber,downloadPath)
+}
+
+/***
+*install arproduct packages part, arguments: projectName, buildNumber like env.BUILD_NUMBER, ocelotpath 
+*if RemoteInstall_0.tmp contains fail, it will terminate.
+*It installs products which name suffix with buildNumber+'.zip' under <projectFolder>/candidate-release/<productVersionFolder>/
+*/
+void installARProduct(projectFolder,propertiesFileName,productPrefix,productVersion,buildNumber,ocelotpath){
+	def local_linux=getSomeProperties(projectFolder+'/'+propertiesFileName,'local.linux')
+	def flag=sh(returnStatus: true, script: '''ssh '''+local_linux+''' 'cat '''+ocelotpath+'''/RemoteInstall_0.tmp | grep fail' ''')
+	def arproductRepo=getSomeProperties(projectFolder+'/'+propertiesFileName,'arproduct.repo.linux')
+	def downloadFileName
+
+	//RemoteInstall_0.tmp cannot exist or RemoteInstall_0.tmp only contains pass
+	if(flag==1){
+		//copy RemoteInstallARProducts.sh to local server
+	    def local_linux_user='/home/'+local_linux[0..local_linux.indexOf("@")-1]
+	    sh( returnStatus: true, script: 'scp ci-script/RemoteInstallARProducts.sh '+local_linux+':'+local_linux_user)
+	    sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'chmod u+x RemoteInstallARProducts.sh' ''')
+	
+		if(arproductRepo){
+		//download from local server
+			def arproduct_repo_linux=arproductRepo+projectFolder+'/candidate-release/'
+			if(buildNumber){
+				//find /home/test/repository/ARProduct/hkma/candidate-release/5.29.0 -type f -name *b3.zip | xargs cp -t PIPEAR4HKMA
+				sh( returnStatus: true, script: '''ssh '''+local_linux+''' 'find '''+arproduct_repo_linux+''' -type f -name '''+productPrefix+'''*'''+productVersion+'''*'''+buildNumber+'''.lrm | xargs cp -t '''+ocelotpath+''' ' ''')
+			}else{
+				downloadFileName=downloadARProduct(projectFolder,propertiesFileName,productPrefix,productVersion,buildNumber,ocelotpath)
+			}
+		}else{
+		//download from remote server
+			downloadFileName=downloadARProduct(projectFolder,propertiesFileName,productPrefix,productVersion,buildNumber,ocelotpath)
+		}
+		
+	    sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'sh RemoteInstallARProducts.sh '''+ocelotpath+''' '''+productPrefix+'''*'''+productVersion+'''*'''+buildNumber+'''.lrm ' ''')
+	}else{
+		error continue_status0+" contains fail, cannot continue to install products."
+	}
+
+}
+
+
+/***
+*new install or upgrade ar platform part, arguments: projectName, ocelot properties's name like 'hkma_upgrade_ocelot.properties' 'hkma_new_ocelot.properties'
+* use ocelot.user.password= to judged new install or upgrade
+*/
+void opAROcelot(projectFolder,propertiesFileName,ocelotPrefix,ocelotVersion,ocelotPropFileName){
+	//def ocelot_prop='_upgrade_ocelot.properties'
+	
+	def local_linux=getSomeProperties(projectFolder+'/'+propertiesFileName,'local.linux')
+	def local_db_oracle=getSomeProperties(projectFolder+'/'+propertiesFileName,'local.oracle')
+	def ar_repo_linux=getSomeProperties(projectFolder+'/'+propertiesFileName,'ar.repo.linux')
+	
+	def mainOcelotVersion
+	def arBuildNumber
+	if(ocelotVersion.contains('b')){
+		mainOcelotVersion=ocelotVersion[0..ocelotVersion.indexOf("-b")-1]
+		arBuildNumber=ocelotVersion[ocelotVersion.indexOf("b")..-1]
+	}else{
+		mainOcelotVersion=ocelotVersion
+	}
+	def installflag=false
+	//transfer ocelot properties to workspace for getting properties
+	//sh( returnStatus: true, script: 'scp '+local_linux+':'+local_linux_citool+ocelotPropFileName+' '+env.WORKSPACE)
+	def ocleot_user_password=getAROcelotProperty(ocelotPropFileName,'ocelot.user.password')
+	def local_linux_ocelotpath=getAROcelotProperty(ocelotPropFileName,'ocelot.install.path')
+	def downloadFileName
+	if(ocleot_user_password){
+		echo "new install agile reporter platform"
+		echo "Agile Reporter need to install(new) version: "+ocelotVersion
+		def local_dbname=getAROcelotProperty(ocelotPropFileName,'ocelot.jdbc.username')
+		def local_dbinstance=getAROcelotProperty(ocelotPropFileName,'ocelot.jdbc.url')
+		def jdbcurlarr=local_dbinstance.split(':')
+		local_dbinstance=jdbcurlarr[-1]
+		echo "create oracle database"
+		sh( returnStatus: true, script: '''ssh '''+local_db_oracle+'''  './impdp_and_expdp_shell/opSchema.sh '''+local_dbinstance+''' '''+local_dbname+''' ' ''')
+	
+		echo "create ocelot install folder"
+		sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'rm -rf '''+local_linux_ocelotpath+''' ' ''')
+		sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'mkdir '''+local_linux_ocelotpath+''' ' ''')
+		installflag=true
+	}else{
+		echo "upgrade agile reporter platform"
+		echo "Agile Reporter need to upgrade to "+ocelotVersion
+		def arExistedVersion=sh( returnStdout: true, script: '''ssh '''+local_linux+''' 'cat '''+local_linux_ocelotpath+'''/ocelot.properties | grep ^external.version ' ''').trim()
+		arExistedVersion=arExistedVersion[arExistedVersion.indexOf("=")+1..-1]
+		echo "Agile Reporter existed version:"+arExistedVersion
+		if(ocelotVersion==arExistedVersion){
+			echo "Agile Reporter installed version is "+arExistedVersion+", no need to upgrade."
+		}else{
+			installflag=true
+		}
+	}
+
+	if(installflag){
+		//transfter RemoteInstall.sh to local linux ocelot installed server
+		def local_linux_user='/home/'+local_linux[0..local_linux.indexOf("@")-1]
+		//copy RemoteInstall.sh to local server
+		sh( returnStatus: true, script: 'scp ci-script/RemoteInstall.sh '+local_linux+':'+local_linux_user)
+		sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'chmod u+x RemoteInstall.sh' ''')
+		//copy ocelot.properties to local ocelot folder
+		sh( returnStatus: true, script: '''ssh 'find '''+env.WORKSPACE+'''/test/ -type f -name '''+ocelotPropFileName+''' '''+local_linux+''':'''+local_linux_ocelotpath+''' ' ''')
+		def ocelotFileName=ocelotPrefix+'-'+ocelotVersion+'.jar'
+		if(ar_repo_linux){
+			if(arBuildNumber){
+				//copy ar jar to local ocelot folder
+				sh( returnStatus: true, script: 'scp '+local_linux+' '+ar_repo_linux+mainOcelotVersion+'/'+arBuildNumber+'/'+ocelotFileName+' '+local_linux_ocelotpath)
+			}else{
+				downloadFileName=downloadOcelot(projectFolder,propertiesFileName,ocelotPrefix,mainOcelotVersion,arBuildNumber,local_linux_ocelotpath)
+			}
+		}else{
+			//download from remote server
+			downloadFileName=downloadOcelot(projectFolder,propertiesFileName,ocelotPrefix,mainOcelotVersion,arBuildNumber,local_linux_ocelotpath)
+		}
+		sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'sh '''+local_linux_user+'''/RemoteInstall.sh -help' ''')
+		sh( returnStatus: true, script: '''ssh '''+local_linux+'''  'sh RemoteInstall.sh '''+local_linux_ocelotpath+''' 0 '''+ocelotFileName+''' '''+ocelotPropFileName+'''' ''')
+		def flag=sh(returnStatus: true, script: '''ssh '''+local_linux+''' 'cat '''+local_linux_ocelotpath+'''/RemoteInstall_0.tmp | grep fail' ''')
+		if(flag==1){//RemoteInstall_0.tmp cannot exist or RemoteInstall_0.tmp only contains pass
+			echo "Agile Reporter Platform installed pass"
+		}else{
+			error "Agile Reporter Platform installed fail"
+		}
+
+	}
+	
+}
