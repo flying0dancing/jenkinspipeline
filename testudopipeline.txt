@@ -1,0 +1,59 @@
+#!groovy
+server = Artifactory.server '-2131115395@1455437299997'
+rtMaven = Artifactory.newMavenBuild()
+rtMaven.tool = 'mvn-3.3.9' // Tool name from Jenkins configuration
+rtMaven.deployer( releaseRepo: 'libs-release-local', snapshotRepo: 'libs-snapshot-local', server: server)
+rtMaven.resolver( releaseRepo: 'libs-release', snapshotRepo: 'libs-snapshot', server: server)
+rtMaven.deployer.deployArtifacts = false // Disable artifacts deployment during Maven run
+buildInfo = Artifactory.newBuildInfo()
+pipeline {
+    agent { label 'SHA-AR-PRODUCT-CI-TEST' } 
+    environment {
+    JAVA_HOME = tool 'JDK8'
+  }
+    stages {
+        stage('build') { 
+            steps {
+                echo "start job ${JOB_URL}..."
+                echo "path:${PATH}"
+                checkout([$class: 'GitSCM', branches: [[name: '*/master']], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'jenkins', url: 'https://jenkins@bitbucket.lombardrisk.com/scm/cprod/testudo.git']]])
+
+            }
+        }
+        stage ('artifactory configuration') {
+            steps{
+                // Obtain an Artifactory server instance, defined in Jenkins --> Manage:
+                echo "build info:${buildInfo}"
+            }
+            
+        }
+        stage('Test') { 
+            steps {
+                sh'''
+                ls 
+                '''
+            }
+        }
+        stage ('maven install') {
+            steps{
+                 echo 'maven install'
+                //mavenInstall()
+            }
+        }
+        stage('deploy') {
+            steps {
+                echo 'dddddd'
+				//mavenDeploy()
+            }
+        }
+    }
+}
+
+void mavenInstall(){
+	rtMaven.run pom: 'pom.xml', goals: 'clean install -U -DskipITs -DskipTests', buildInfo: buildInfo
+}
+
+void mavenDeploy(){
+	rtMaven.deployer.deployArtifacts buildInfo
+	server.publishBuildInfo buildInfo
+}

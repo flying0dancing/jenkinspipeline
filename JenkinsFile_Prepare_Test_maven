@@ -58,63 +58,6 @@ def updateBuild(htmlStr){
     currentBuild.description=(currentBuild.description?currentBuild.description:'')+htmlStr
 }
 
-def updateBuild_Product(rows){
-	def rowsInfo=getAllDisplayRows(rows)
-	def htmlStr=convertToTable(
-                        description: 'Install Product Packages',
-                        firstColumn: 'Install Info', secondColumn: 'Status',
-                        rows: rowsInfo
-                    )
-	updateBuild(htmlStr)
-}
-String createLink(bucketName,s3repo,downloadpath,downloadname){
-    def rootUrl="https://s3-eu-west-1.amazonaws.com"
-    return """<a href = '$rootUrl/$bucketName/$s3repo/${downloadpath}' title = 'Download [${downloadname}] from the [$bucketName] S3 bucket'>${downloadpath}</a>"""
-}
-
-String createDisplaySteps(List stepList){
-	def statusStr=''
-	stepList.each{ it -> statusStr=statusStr+""" <div>${it}</div> """}
-	return statusStr
-}
-String createDisplayRow(String jsoninfo, List status){
-	def statusStr=createDisplaySteps(status)
-	return """
-			<tr>
-                <td>
-					<pre>
-						<code>
-							$jsoninfo
-						</code>
-					</pre>
-				</td>
-                <td>$statusStr</td>
-            </tr>
-			"""
-}
-String getAllDisplayRows(Map rows){
-	def rowInfo=''
-	rows.each{ key, value -> rowInfo=rowInfo+createDisplayRow(key,value)}
-	println(rowInfo)
-	return rowInfo
-}
-
-def convertToTable(Map args) {
-    return """
-        <h3 style='margin-bottom:5px'>${args.description}:</h3>
-        <table class='pane stripped-odd bigtable' style='text-align: left'>
-            <thead>
-                <tr>
-                    <th class='pane-header' style='width:40%'>${args.firstColumn}</th>
-                    <th class='pane-header' style='width:30%'>${args.secondColumn}</th>
-                </tr>
-            </thead>
-            <tbody>
-                ${args.rows}
-            </tbody>
-        </table>"""
-}
-
 String getVersionOfArInstaller(productPrefix){
     def arInstallerVersion = sh (
         script: '''awk -F '=' /^ar.installer.version[^.]/'{print $2}' '''+productPrefix+'''/'''+ARProduct_Properties,
@@ -234,7 +177,7 @@ def installOcelotJson(projectFolder,propertiesFileName){
 	}
 }
 def installProductsJson(projectFolder,propertiesFileName){
-	def jsonFileName=getSomeProperties(projectFolder+'/'+propertiesFileName,'install.product.list')
+	def jsonFileName=getSomeProperties(projectFolder+'/'+propertiesFileName,'install.ocelot.list')
 	def files=findFiles(glob: '**/'+projectFolder+'/**/'+jsonFileName)
 	def gado
 	def installProducts
@@ -249,12 +192,15 @@ def installProductsJson(projectFolder,propertiesFileName){
 		if(installproducts){
 			createDisplayHeadline('Install Product Packages','3')
 			for(int i=0;i<installproducts.size();i++){
-				createDisplayHeadline(installproducts[i].id+': '+installproducts[i].prefix+' v'+installproducts[i].version,'4')
-				createDisplayStartOl()
+				//createDisplayHeadline(installproducts[i].id+': '+installproducts[i].prefix+' v'+installproducts[i].version,'4')
+				//createDisplayStartOl()
 				if(installproducts[i].installpath){
 					installOcelotPath=installproducts[i].installpath
 				}
 				if(installOcelotPath){
+					if(installproducts[i].version==null){
+				        installproducts[i].version=''
+				    }
 					def productVer=installproducts[i].version
 					def buildNumber
 					if(installproducts[i].version.contains('-b')){
@@ -262,6 +208,8 @@ def installProductsJson(projectFolder,propertiesFileName){
 						productVer=productVer[0..productVer.indexOf('-b')-1]
 					}
 					def downloadFileName=searchLatestProduct(projectFolder,propertiesFileName,installproducts[i].prefix.toUpperCase(),productVer,buildNumber)
+					createDisplayHeadline(installproducts[i].id+': '+downloadFileName,'4')
+					createDisplayStartOl()
 					if(downloadFileName){
 						if(!installproducts[i].needinstall || installproducts[i].needinstall!="no"){
 							installARProduct(projectFolder,propertiesFileName,downloadFileName,buildNumber,installOcelotPath)
