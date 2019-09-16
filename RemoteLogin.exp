@@ -1,0 +1,31 @@
+#!/usr/bin/expect
+
+set timeout 10
+set host "172.20.31.38"
+set username "testp"
+set password "password"
+
+ssh-keygen -t rsa
+expect "id_rsa"
+{
+ send "\r"
+}
+expect "Overwrite(y/n)"
+{
+	send "y\r"
+}
+expect "Enter passphrase"
+{
+	send "\r"
+}
+expect "Enter same passphrase"
+{
+	send "\r"
+}
+
+scp .ssh/id_rsa.pub $username@$host:~/.ssh/s.pub
+
+spawn ssh $username@$host
+expect "*password*" {send "$password\r"}
+cat ~/.ssh/s.pub >> ~/.ssh/authorized_keys
+exit

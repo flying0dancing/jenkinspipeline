@@ -1,0 +1,360 @@
+#!groovy
+pipeline{
+    agent { label 'PRODUCT-CI-TEST' }
+    stages{
+        stage("parallel test"){
+            steps{
+                checkoutTestARProduct('test-hkma','hkma','feature/ci')
+                testParallel('hkma')
+                
+            }
+        }
+    }
+}
+
+String createDisplayHeadline(String content,String headsize){
+	return updateBuild("""<h${headsize} style='margin-bottom:5px'>${content}</h${headsize}>""")
+}
+String createDisplayStartOl(){
+	return updateBuild(""" <ol> """)
+}
+String createDisplayStepline(String content){
+	return updateBuild(""" <li>${content}</li> """)
+}
+String createDisplayEndOl(){
+	return updateBuild(""" </ol> """)
+}
+def updateBuild(htmlStr){
+    currentBuild.description=(currentBuild.description?currentBuild.description:'')+htmlStr
+}
+def testParallel(projectFolder){
+    def branches=[:]
+    MAX_CONCURRENT = 2
+    //create a fifo
+    latch = new java.util.concurrent.LinkedBlockingDeque(MAX_CONCURRENT)
+    //put resource in fifo
+    for(int i=0; i<MAX_CONCURRENT; i++)
+    {latch.offer("$i")}
+    //def job_list = ["test1","test2","test3","test4","test5","test6"]
+    def job_list=getSubFolders(projectFolder)
+                    
+    for(int i=0; i<job_list.size(); i++) {
+        def name = job_list[i]
+        branches[name] = {
+            def thing = null
+            waitUntil {
+                thing = latch.pollFirst();
+                return thing != null;
+            }
+            try {
+                //执行job
+                //build(job: name, propagate: false)
+                echoName(name)
+                installersJson(projectFolder,name)
+            }finally {
+                //release a resource
+                latch.offer(thing)
+            }
+        }
+    }
+    parallel branches
+}
+
+
+def echoName(String name){
+    echo "execute: ${name}......."
+}
+
+void checkoutTestARProduct(repoFolder,projectFolder,branch){
+    checkout([$class: 'GitSCM', branches: [[name: "*/${branch}"]], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'CleanBeforeCheckout'], [$class: 'RelativeTargetDirectory', relativeTargetDir: "${projectFolder}"]], submoduleCfg: [], userRemoteConfigs: [[credentialsId: '46afdff1-cdd3-4098-b8af-d904b4d298aa', url: "ssh://git@bitbucket.lombardrisk.com:7999/cprod/${repoFolder}.git"]]])
+}
+
+def getSubFolders(projectFolder){
+    def allFolders=[]
+    dir(projectFolder+'/src/main/resources'){
+        allFolders=sh(returnStdout: true, script: '''ls -l|grep "^d"|awk '{ print $NF }' ''').trim().split()
+        echo "all subfolders: ${allFolders}"
+    }
+    allFolders=getValidFolders(allFolders)
+    
+    return allFolders
+}
+
+def getValidFolders(folders){
+    def allFolders=[]
+    for(int i=0;i<folders.size();i++){
+        if(findFiles(glob: '**/'+folders[i]+'/deployment.json')){
+            allFolders+=folders[i]
+        }
+    }
+    echo "valid folders: ${allFolders}"
+    return allFolders
+}
+
+def installersJson(projectFolder,deployFolder){
+	
+    def jsonFileName='deployment.json'
+    def propertiesFileName='env.properties'
+	def files=findFiles(glob: '**/'+projectFolder+'/**/'+deployFolder+'/'+jsonFileName)
+    def propertiesFiles=findFiles(glob: '**/'+projectFolder+'/**/'+deployFolder+'/'+propertiesFileName)
+    
+	def gado
+	def installers
+	def installOcelotPath
+	def installPrefix
+	gado=readJSON file: files[0].path
+		installers=gado.installers
+		if(installers){
+			createDisplayHeadline('Install Ocelot and Products','3')
+			for(int i=0;i<installers.size();i++){
+				installPrefix=installers[i].prefix
+				
+                if(installPrefix.equals('AgileREPORTER')){
+					findAROcelot(installers[i],projectFolder,propertiesFiles[0])
+				}else{
+					findARProduct(installers[i],projectFolder,propertiesFiles[0])
+				}
+					
+			}
+		}else{
+			error "canot found intsall products in gado.json"
+		}
+	
+}
+
+def getInstallerMainVersion(installVer){
+    if(installVer==null || installVer.equals('LATEST')){
+        installVer=''
+    }else{
+        if(installVer.contains('-b')){
+            installVer=installVer[0..installVer.indexOf('-b')-1]
+        }
+    }
+    return installVer
+}
+
+def getInstallerBuildNumber(installVer){
+    def buildNumber
+    if(installVer!=null && installVer.contains('-b')){
+        buildNumber=installVer[installVer.indexOf('b')..-1]
+    }
+    return buildNumber
+}
+
+def getInstallerRealBuildNumber(downloadFileName,buildNumber){
+    if(downloadFileName){
+        buildNumber=downloadFileName[downloadFileName.indexOf('b')..-5]
+	    if(buildNumber.indexOf('_sign')!=-1){
+		    buildNumber=buildNumber[0..buildNumber.indexOf('_sign')-1]
+	    }
+    }
+    return buildNumber
+}
+
+def findAROcelot(ocelotInstaller,projectFolder,propertiesFileName){
+    def installVer=ocelotInstaller.version
+	createDisplayHeadline(' * ['+ocelotInstaller.prefix+', '+installVer+']','4')
+	createDisplayStartOl()
+    if(!ocelotInstaller.needInstall || !ocelotInstaller.needInstall.equals("no")){
+		echo 'install '+ocelotInstaller.prefix+'...'
+        def downloadFileName=searchLatestOcelot(projectFolder,propertiesFileName,ocelotInstaller.prefix,getInstallerMainVersion(installVer),getInstallerBuildNumber(installVer))
+		createDisplayStepline('install ocelot: '+downloadFileName)
+		//TODO
+	}else{
+		echo "no need to install ["+ocelotInstaller.prefix+", "+installVer+" ]"
+		createDisplayStepline('install ocelot: no need, skip')
+	}
+	createDisplayEndOl()
+}
+
+def findARProduct(productInstaller,projectFolder,propertiesFileName){
+    def installVer=productInstaller.version
+    def buildNumber=getInstallerBuildNumber(installVer)
+    def downloadFileName
+	createDisplayHeadline(' * ['+productInstaller.prefix+', '+installVer+']','4')
+	createDisplayStartOl()
+    if(!productInstaller.needInstall || !productInstaller.needInstall.equals("no")){
+		echo 'install Product '+productInstaller.prefix+'...'
+		installVer=getInstallerMainVersion(installVer)
+        downloadFileName=searchLatestProduct(projectFolder,propertiesFileName,productInstaller.prefix.toUpperCase(),installVer,buildNumber)
+		createDisplayStepline('install product: '+downloadFileName)
+		//installARProduct(projectFolder,propertiesFileName,downloadFileName,buildNumber,installOcelotPath)
+	}else{
+		echo "no need to install product ["+productInstaller.prefix+", "+installVer+" ]"
+		createDisplayStepline('install product: no need, skip')
+	}
+    
+    buildNumber=getInstallerRealBuildNumber(downloadFileName,buildNumber)
+    def props=productInstaller.props
+	if(props){
+		for(int j=0;j<props.size();j++){
+			if(!props[j].needConfig || !props[j].needConfig.equals("no")){
+				def eaFlag='1'
+                if(props[j].REPORTERMetadata.equals("yes")){
+                    echo "config REPORTER metadata ${props[j]}"
+					createDisplayStepline('config '+props[j])
+                }else{
+                    echo "config PRODUCT ${props[j]}"
+					createDisplayStepline('config '+props[j])
+					eaFlag='2'
+                }
+				//linkARprojectDID(projectFolder,propertiesFileName,productInstaller.prefix,installVer+'-'+buildNumber,props[j].filename,props[j].aliases,installOcelotPath,eaFlag)
+            }else{
+                echo "no need to config ${props[j]}"
+				createDisplayStepline('config '+props[j]+': no need, skip')
+            }
+		}
+	}
+
+	createDisplayEndOl()
+						
+}
+
+/**search installer from s3
+* @s3repo: test.properties, get property s3.bucket, local.linux from it
+* @projectFolder like hkma, mas
+* @propertiesFileName: test.properties, get property s3.bucket, local.linux from it
+* @productPrefixAndVersion like CE_DPB_v1.0.0-b9_sign.lrm's CE_DPB_v1.0.0
+* @buildNumber: like CE_DPB_v1.0.0-b9_sign.lrm's b9
+* @productSuffix: .lrm .jar
+*/
+String searchLatestFromS3(s3repo,projectFolder,propertiesFileName,productPrefixAndVersion,buildNumber,productSuffix){
+	def downloadFileName
+	def downfiles
+	def s3_bucket=getSomeProperties(propertiesFileName,'s3.bucket')
+	withAWS(credentials: 'aws') {
+		if(buildNumber){
+			downfiles=s3FindFiles(bucket:s3_bucket, path:s3repo, glob:"**/${productPrefixAndVersion}*${buildNumber}*${productSuffix}")
+		}else{
+			downfiles=s3FindFiles(bucket:s3_bucket, path:s3repo, glob:"**/${productPrefixAndVersion}*${productSuffix}")
+		}
+		
+    }
+	if(downfiles){
+		//downfiles.each{print "${it.name},${it.path},${it.length},${it.lastModified}"}
+		def lastIndex=0
+		def lastBuildNumber=downfiles[0].lastModified
+		downloadFileName=downfiles[0].name
+		for(int index=0;index<downfiles.size();index++){
+			if(lastBuildNumber<downfiles[index].lastModified){
+				lastBuildNumber=downfiles[index].lastModified
+				lastIndex=index
+				downloadFileName=downfiles[index].name
+			}
+		}
+	}
+	echo "Latest installer name "+downloadFileName
+	return downloadFileName
+}
+String searchLatestProduct(projectFolder,propertiesFileName,productPrefix,productVersion,buildNumber){
+	def s3_ar_repo='arproduct/'+projectFolder+'/CandidateReleases/'
+	return searchLatestFromS3(s3_ar_repo,projectFolder,propertiesFileName,productPrefix+'_v'+productVersion,buildNumber,'.lrm')
+}
+String searchLatestOcelot(projectFolder,propertiesFileName,productPrefix,productVersion,buildNumber){
+	def s3_ar_repo='AgileREPORTER/Releases/CandidateReleases/'
+	return searchLatestFromS3(s3_ar_repo,projectFolder,propertiesFileName,productPrefix+'-'+productVersion,buildNumber,'.jar')
+}
+
+String getSomeProperties(propFile,keystr){
+	def files =findFiles(glob: '**/'+propFile)
+	def returnValue=''
+	def props
+	for(int index=0;index<files.size();index++){
+		props = readProperties interpolate: true, file: files[index].path
+		props.each{
+			if(it.key==keystr){
+				//println(it.key + " = " + it.value)
+				returnValue=it.value
+				return returnValue
+			}
+		}
+	}
+	return returnValue
+}
+
+/***
+*install arproduct packages part, if RemoteInstall_0.tmp contains fail, it will terminate.
+* @projectFolder like hkma, mas
+* @propertiesFileName: test.properties, get property local.linux local.oracle ar.repo.linux from it
+* @downloadFileName like CE_DPB_v1.0.0-b9_sign.lrm under <projectFolder>/candidate-release/<productVersionFolder>/
+* @downloadFromLocalServer: null means download from remote
+* @ocelotpath: install path
+*/
+void installARProduct(projectFolder,propertiesFileName,downloadFileName,downloadFromLocalServer,ocelotpath){
+	def local_linux=getSomeProperties(propertiesFileName,'app.host')
+	def app_user=getSomeProperties(propertiesFileName,'app.user')
+	def arproductRepo=getSomeProperties(propertiesFileName,'product.local.repo')
+	def stepInfo='download product package'
+	def app_hostuser=app_user+'@'+local_linux
+	def downloadPath=ocelotpath+'/deploys/'
+	//create download folder deploys
+	sh( returnStatus: true, script: '''ssh '''+app_hostuser+''' 'mkdir '''+downloadPath+''' ' ''')
+	if(arproductRepo){
+		//download from local server
+		def arproduct_repo_linux=arproductRepo+'/'+projectFolder+'/candidate-release/'
+		if(downloadFromLocalServer){
+			//find /home/test/repository/ARProduct/hkma/candidate-release/5.29.0 -type f -name *b3.zip | xargs cp -t PIPEAR4HKMA
+			createDisplayStepline(stepInfo+' from local')
+			sh( returnStatus: true, script: '''ssh '''+app_hostuser+''' 'find '''+arproduct_repo_linux+''' -type f -name '''+downloadFileName+''' | xargs cp -t '''+downloadPath+''' ' ''')
+		}else{
+			createDisplayStepline(stepInfo+' from remote')
+			downloadARProduct(projectFolder,propertiesFileName,downloadFileName,downloadPath)
+		}
+	}else{
+		createDisplayStepline(stepInfo+' from remote')
+		downloadARProduct(projectFolder,propertiesFileName,downloadFileName,downloadPath)
+	}
+		
+	sh( returnStatus: true, script: '''ssh '''+app_hostuser+'''  'sh RemoteInstall.sh '''+ocelotpath+''' 1 '''+downloadPath+downloadFileName+''' ' ''')
+	def allstatus=sh(returnStdout: true, script: '''ssh '''+app_hostuser+''' 'cat '''+ocelotpath+'''/RemoteInstall_1.tmp ' ''').trim()
+	if(allstatus){
+		createDisplayStepline(allstatus)
+		if(allstatus.contains('fail')){
+			createDisplayEndOl()
+			error "install or upgrade product contains fail."
+		}else{
+			echo "install or upgrade product pass."
+		}
+	}
+}
+
+/***
+*config DID part, arguments: projectName, productPrefix, ocelotpath, DID's properties's name suffix like 'aliasinfo.properties' 
+* @projectFolder like hkma, mas
+* @propertiesFileName: test.properties, get property local.linux local.oracle ar.repo.linux from it
+* @productPrefix like CE_DPB_v1.0.0-b9_sign.lrm's CE_DPB
+* @productVersion like CE_DPB_v1.0.0-b9_sign.lrm's 1.0.0-b9
+* @productPropFileName: ce config properties
+* @productPropAliases: like "STB Work:STB System:STB System HKMA"
+* @ocelotpath: install path
+*/
+def linkARprojectDID(projectFolder,propertiesFileName,productPrefix,productVersion,productPropFileName,productPropAliases,ocelotpath,eaFlag){
+	def continue_status1='RemoteInstall_1.tmp'
+	def local_linux=getSomeProperties(propertiesFileName,'app.host')
+	def app_user=getSomeProperties(propertiesFileName,'app.user')
+	def app_hostuser=app_user+'@'+local_linux
+	def downloadPath=ocelotpath+'/deploys/'
+	//copy aliasinfo.properties to local ocelot folder
+	stepInfo='find and copy '+productPropFileName
+	flag=sh( returnStatus: true, script: '''scp `find '''+env.WORKSPACE+'''/'''+projectFolder+'''/src/main/resources/properties/ -type f -name "'''+productPropFileName+'''"` '''+app_hostuser+''':'''+downloadPath)
+	if(flag==0){
+		createDisplayStepline(stepInfo+' pass')
+		sh( returnStatus: true, script: '''ssh '''+app_hostuser+'''  'sh RemoteInstall.sh '''+ocelotpath+''' '''+eaFlag+''' '''+downloadPath+productPropFileName+''' '''+productPrefix.toUpperCase()+''' '''+ productVersion+''' \"'''+productPropAliases+'''\" ' ''')
+		def allstatus=sh(returnStdout: true, script: '''ssh '''+app_hostuser+''' 'cat '''+ocelotpath+'''/'''+continue_status1+''' ' ''').trim()
+		if(allstatus){
+			createDisplayStepline('config DID: '+allstatus.replaceAll('configure','<br />configure'))
+			if(allstatus.contains('fail')){
+				createDisplayEndOl()
+				error "config properties contains fail."
+			}else{
+				echo "config properties pass."
+			}
+		}
+	}else{
+		createDisplayStepline(stepInfo+' fail')
+		createDisplayEndOl()
+		error "fail to copy properties file from slave"
+	}
+	
+}
+
