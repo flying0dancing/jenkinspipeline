@@ -1,0 +1,96 @@
+#!groovy
+S3_BUCKET = 'lrm-deploy'
+Local_Linux='test@172.20.31.7'
+ARProduct_Repo_Linux='repository/ARProduct/'
+AR_Repo_Linux='repository/AgileREPORTER/'
+
+pipeline {
+    agent none
+    options {
+        timeout(time: 60, unit: 'MINUTES') 
+    }
+    environment{
+		quick_test=false
+	}
+    stages {
+        stage('download ar product config'){
+			agent { label 'SHA-AR-PRODUCT-CI-TEST' }
+			steps{
+				checkoutARProduct(env.JOB_NAME)
+				sh 'pwd'
+			}
+		}
+        stage('linux'){
+           agent { label 'SHA-AR-PRODUCT-CI-TEST' }
+                steps{
+                    echo env.JOB_NAME
+                    sh 'pwd'
+                    downloadARInstaller(env.JOB_NAME)
+                    sh 'pwd'
+                }
+            }
+        stage('example when'){
+            agent none
+             when {
+				    expression{return (quick_test=="true")}
+			    }
+			steps{
+			   echo "haha"
+			}
+		}
+		
+    }
+}
+void checkoutARProduct(jobName){
+    awsIdentity()
+    echo "start job ${JOB_URL}"
+    echo "branch number: ${env.BUILD_NUMBER}"
+    echo "branch name: ${env.BUILD_ID}"
+    def productPrefix=jobName[0..jobName.indexOf("_")-1]   
+    productPrefix='fed'
+    //checkout([$class: 'GitSCM', branches: [[name: '*/master']], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'CleanBeforeCheckout'], [$class: 'RelativeTargetDirectory', relativeTargetDir: "${productPrefix}"]], submoduleCfg: [], userRemoteConfigs: [[credentialsId: '46afdff1-cdd3-4098-b8af-d904b4d298aa', url: "ssh://git@bitbucket.lombardrisk.com:7999/cprod/${productPrefix}.git"]]])
+                
+    //checkout([$class: 'GitSCM', branches: [[name: '*/master']], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'CleanBeforeCheckout'], [$class: 'RelativeTargetDirectory', relativeTargetDir: 'ci-script']], submoduleCfg: [], userRemoteConfigs: [[credentialsId: '46afdff1-cdd3-4098-b8af-d904b4d298aa', url: 'ssh://git@bitbucket.lombardrisk.com:7999/cprod/ci-script.git']]])
+}
+void downloadARInstaller(jobName){
+    def productPrefix=jobName[0..jobName.indexOf("_")-1]
+    def downfiles
+    productPrefix='fed'
+	echo "product prefix: ${productPrefix}"
+    /*def arInstallerVersion = sh (
+      script: '''awk -F '=' /^ar.installer.version[^.]/'{print $2}' fed/package.properties''',
+      returnStdout: true
+    ).trim()*/
+    def arInstallerVersion = sh (
+        script: '''awk -F '=' /^ar.installer.version[^.]/'{print $2}' '''+productPrefix+'''/package.properties''',
+        returnStdout: true
+        ).trim()
+    echo "arInstallerVersion: ${arInstallerVersion}"
+    withAWS(credentials: 'aws') {
+        downfiles=s3FindFiles(bucket:S3_BUCKET, path:'AgileREPORTER/Releases/CandidateReleases/', glob:"**/AgileREPORTER-${arInstallerVersion}-b704*.jar")
+        //downfiles.each{s3Download(bucket:S3_BUCKET, path:"AgileREPORTER/Releases/CandidateReleases/${it.path}",file:"${it.path}",force:true)}
+        downfiles.each{print "${it.name},${it.path},${it.length},${it.lastModified}"}
+    }
+	def ar_path=downfiles[0].path[0..downfiles[0].path.indexOf(downfiles[0].name)-1]
+	echo "${ar_path}"
+    //def fileExisted=sh(returnStdout: true, script: 'ssh '+Local_Linux+''' "[ -e ~/te ]";echo $?''')
+    echo AR_Repo_Linux+ar_path
+	sh( returnStatus: true, script: '''ssh '''+Local_Linux+'''  'mkdir -p '''+AR_Repo_Linux+ar_path+'''' ''')
+	def jarExisted=sh(returnStdout: true, script: '''ssh '''+Local_Linux+''' '[ -e '''+AR_Repo_Linux+downfiles[0].path+''' ]; echo $?' ''').trim()
+
+    if(jarExisted=='0'){//existed
+        echo "Agile Reporter jar already exists.No need to download again."
+    }else{
+        withAWS(credentials: 'aws') {
+            s3Download(bucket:S3_BUCKET, path:'AgileREPORTER/Releases/CandidateReleases/'+downfiles[0].path,file:downfiles[0].path,force:true)
+        }
+        def status=sh( returnStatus: true, script: 'scp '+downfiles[0].path+' '+Local_Linux+':'+AR_Repo_Linux+ar_path)
+        if(status=='0'){
+            echo "Status of downloaded Agile Reporter jar: pass"
+        }else{
+            echo "Status of downloaded Agile Reporter jar: fail"
+        }
+    }
+
+	
+}

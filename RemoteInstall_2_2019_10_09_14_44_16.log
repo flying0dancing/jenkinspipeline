@@ -1,0 +1,81 @@
+./bin/config.sh -aa CE_DPB -iv 1.0.0-b9 -alias "STB CORE Data" -aif "HKMAoracleDataaliasinfo.properties"
+================================================================================
+enter config.sh
+JAVA_HOME NOT SET IN OCELOT.PROPERTIES
+JAVA_HOME NOT SET IN SYSTEM
+JAVA FIND IN PATH
+JAVA VERSION IS OK
+java version "1.8.0_91"
+Java(TM) SE Runtime Environment (build 1.8.0_91-b14)
+Java HotSpot(TM) 64-Bit Server VM (build 25.91-b14, mixed mode)
+java installed
+HikariPool-0 - is starting.
+HikariPool-1 - is starting.
+version: 1.16.2.2-b123
+Add active alias fail [The alias:STB CORE Data has existed under this package.].
+./bin/config.sh -aa CE_DPB -iv 1.0.0-b9 -alias "STB Data HKMA" -aif "HKMAoracleDataaliasinfo.properties"
+================================================================================
+enter config.sh
+JAVA_HOME NOT SET IN OCELOT.PROPERTIES
+JAVA_HOME NOT SET IN SYSTEM
+JAVA FIND IN PATH
+JAVA VERSION IS OK
+java version "1.8.0_91"
+Java(TM) SE Runtime Environment (build 1.8.0_91-b14)
+Java HotSpot(TM) 64-Bit Server VM (build 25.91-b14, mixed mode)
+java installed
+HikariPool-0 - is starting.
+HikariPool-1 - is starting.
+version: 1.16.2.2-b123
+Start to edit alias for connection: [dbhost]:172.20.20.49,[dbport]:1521,[dbusername]:HKMA_52311_UP_DATA,[dbname]:null,[dbinstance]:ora11g,[dbSchemaName]:HKMA_52311_UP_DATA, signature: 648895021
+System property [org.owasp.esapi.opsteam] is not set
+System property [org.owasp.esapi.devteam] is not set
+Attempting to load ESAPI.properties via file I/O.
+Attempting to load ESAPI.properties as resource file via file I/O.
+Not found in 'org.owasp.esapi.resources' directory or file not readable: /home/test/PIPEAR4HKMA/ESAPI.properties
+Not found in SystemResource Directory/resourceDirectory: .esapi/ESAPI.properties
+Not found in 'user.home' (/home/test) directory: /home/test/esapi/ESAPI.properties
+Loading ESAPI.properties via file I/O failed. Exception was: java.io.FileNotFoundException
+Attempting to load ESAPI.properties via the classpath.
+SUCCESSFULLY LOADED ESAPI.properties via the CLASSPATH from '/ (root)' using current thread context class loader!
+SecurityConfiguration for Validator.ConfigurationFile.MultiValued not found in ESAPI.properties. Using default: false
+SecurityConfiguration for Validator.ConfigurationFile not found in ESAPI.properties. Using default: validation.properties
+Attempting to load validation.properties via file I/O.
+Attempting to load validation.properties as resource file via file I/O.
+Not found in 'org.owasp.esapi.resources' directory or file not readable: /home/test/PIPEAR4HKMA/validation.properties
+Not found in SystemResource Directory/resourceDirectory: .esapi/validation.properties
+Not found in 'user.home' (/home/test) directory: /home/test/esapi/validation.properties
+Loading validation.properties via file I/O failed.
+Attempting to load validation.properties via the classpath.
+validation.properties could not be loaded by any means. fail. Exception was: java.lang.IllegalArgumentException: Failed to load ESAPI.properties as a classloader resource.
+SecurityConfiguration for ESAPI.printProperties not found in ESAPI.properties. Using default: false
+SecurityConfiguration for Encryptor.CipherTransformation not found in ESAPI.properties. Using default: AES/CBC/PKCS5Padding
+SecurityConfiguration for ESAPI.Encoder not found in ESAPI.properties. Using default: org.owasp.esapi.reference.DefaultEncoder
+SecurityConfiguration for ESAPI.Logger not found in ESAPI.properties. Using default: org.owasp.esapi.reference.JavaLogFactory
+SecurityConfiguration for Logger.LogApplicationName not found in ESAPI.properties. Using default: true
+SecurityConfiguration for Logger.LogServerIP not found in ESAPI.properties. Using default: true
+SecurityConfiguration for Logger.ApplicationName not found in ESAPI.properties. Using default: DefaultName
+Connection to Schema <HKMA_52311_UP_DATA> successful.
+ReApply Aliases successfully
+found datasource JNDI name for alias : 
+unable to edit alias because of can't find datasource JNDI name
+Alias 'STB Data HKMA' accepted without check
+Alias 'STB System' accepted without check
+Alias 'QADBDATA' skipped, reason: field 'dbhost' is empty
+Alias 'STB Work' accepted without check
+Alias 'STB CORE Data' accepted without check
+Alias 'STB System HKDPB' skipped, reason: field 'dbhost' is empty
+Alias 'STB Data HKDPB' skipped, reason: field 'dbhost' is empty
+Alias 'STB System' accepted without check
+Alias 'QADBDATA' skipped, reason: field 'dbhost' is empty
+Alias 'STB Data HKMA' accepted without check
+Alias 'STB Work' accepted without check
+Alias 'STB System HKMA' accepted without check
+Alias 'STB CORE Data' accepted without check
+[ReApply Aliases] : aliases are {STB System HKDPB|CE_DPB=[dbhost]:null,[dbport]:0,[dbusername]:null,[dbname]:null,[dbinstance]:null,[dbSchemaName]:null, STB System|CE_DPB=[dbhost]:172.20.20.49,[dbport]:1521,[dbusername]:HKMA_52311_UP_SYSTEM,[dbname]:null,[dbinstance]:ora11g,[dbSchemaName]:HKMA_52311_UP_SYSTEM, STB System|CE_HKMA=[dbhost]:172.20.20.49,[dbport]:1521,[dbusername]:HKMA_52311_UP_SYSTEM,[dbname]:null,[dbinstance]:ora11g,[dbSchemaName]:HKMA_52311_UP_SYSTEM, QADBDATA|CE_HKMA=[dbhost]:null,[dbport]:0,[dbusername]:null,[dbname]:null,[dbinstance]:null,[dbSchemaName]:null, STB Data HKDPB|CE_DPB=[dbhost]:null,[dbport]:0,[dbusername]:null,[dbname]:null,[dbinstance]:null,[dbSchemaName]:null, STB CORE Data|CE_DPB=[dbhost]:172.20.20.49,[dbport]:1521,[dbusername]:HKMA_52311_UP_DATA,[dbname]:null,[dbinstance]:ora11g,[dbSchemaName]:HKMA_52311_UP_DATA, QADBDATA|CE_DPB=[dbhost]:null,[dbport]:0,[dbusername]:null,[dbname]:null,[dbinstance]:null,[dbSchemaName]:null, STB Data HKMA|CE_HKMA=[dbhost]:172.20.20.49,[dbport]:1521,[dbusername]:HKMA_52311_UP_DATA,[dbname]:null,[dbinstance]:ora11g,[dbSchemaName]:HKMA_52311_UP_DATA, STB System HKMA|CE_HKMA=[dbhost]:172.20.20.49,[dbport]:1521,[dbusername]:HKMA_52311_UP_SYSTEM,[dbname]:null,[dbinstance]:ora11g,[dbSchemaName]:HKMA_52311_UP_SYSTEM, STB Work|CE_HKMA=[dbhost]:172.20.20.49,[dbport]:1521,[dbusername]:HKMA_52311_UP_SYSTEM,[dbname]:null,[dbinstance]:ora11g,[dbSchemaName]:HKMA_52311_UP_SYSTEM, STB Data HKMA|CE_DPB=[dbhost]:172.20.20.49,[dbport]:1521,[dbusername]:HKMA_52311_UP_DATA,[dbname]:null,[dbinstance]:ora11g,[dbSchemaName]:HKMA_52311_UP_DATA, STB Work|CE_DPB=[dbhost]:172.20.20.49,[dbport]:1521,[dbusername]:HKMA_52311_UP_SYSTEM,[dbname]:null,[dbinstance]:ora11g,[dbSchemaName]:HKMA_52311_UP_SYSTEM, STB CORE Data|CE_HKMA=[dbhost]:172.20.20.49,[dbport]:1521,[dbusername]:HKMA_52311_UP_DATA,[dbname]:null,[dbinstance]:ora11g,[dbSchemaName]:HKMA_52311_UP_DATA}, reapplying aliases are [com.lombardrisk.ocelot.core.model.config.AliasDto@97b072aa]
+[ReApply Aliases] : connection of alias 'STB Data HKMA' is valid
+[ReApply Aliases] :the exist datasource 'java:/ToolsetDS-648895021' for alias 'STB Data HKMA' in standalone.xml has been removed!
+[ReApply Aliases] : datasource has been created in standalone.xml for alias 'STB Data HKMA'
+[ReApply Aliases] : successfully
+end to edit alias: 
+HikariPool-1 - is closing down.

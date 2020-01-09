@@ -27,6 +27,7 @@ if [ X$1 == X-h -o X$1 == X-help -o X$1 == Xhelp ];then
   echo ""
   echo " Notes: if app or properties are already in installfolder, only type their FileName;"
   echo "        if installfolder does not exist, this.sh will create a new one."
+  echo "        product's propertiesFileName must under bin folder"
   echo "----------------------------------------------------------------------------------------------------------"
   exit
 fi
