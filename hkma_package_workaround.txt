@@ -1,0 +1,88 @@
+#!groovy
+@Library('pipeline-libs') _
+
+stage('setup'){
+	node{
+		loadLocalSteps()
+	}
+}
+private void loadLocalSteps(){
+	library identifier: 'ci-script@packageLib',
+			retriever: modernSCM([
+					$class: 'GitSCMSource',
+					credentialsId: '46afdff1-cdd3-4098-b8af-d904b4d298aa',
+					id: 'a58b1061-f557-46f6-ba36-b53cfdb77d43',
+					remote: 'ssh://git@bitbucket.lombardrisk.com:7999/cprod/ci-script.git',
+					traits: [[$class: 'BranchDiscoveryTrait']]])
+}
+
+ARProject_Prefix=getprojectFolder(env.JOB_NAME)
+
+pipeline {
+    agent { label 'PRODUCT-CI-TEST' }
+    options {
+        timeout(time: 60, unit: 'MINUTES') 
+    }
+    
+    stages {
+        stage('checkout'){
+			steps{
+				script{
+					echo "start job ${JOB_URL}"
+					echo "branch number: ${env.BUILD_NUMBER}"
+					productPackage.checkoutARProduct(ARProject_Prefix)
+				}
+
+			}
+		}
+		stage('validate'){
+			steps{
+				echo "validate metadata before package product config"
+			}
+		}
+		stage('build package'){
+			steps{
+			    script{
+				    echo "build all packages"
+				    productPackage.packageARProduct(ARProject_Prefix,'b'+env.BUILD_NUMBER)
+			
+			    }
+			}
+		}
+		stage('upload package'){
+           steps{
+			   script{
+				   echo "upload all packages"
+				   productPackage.uploadARProduct(ARProject_Prefix,'b'+env.BUILD_NUMBER)
+			   }
+			} 
+        }
+		
+    }
+	post {
+        always {
+            echo 'This will always run'
+        }
+        success {
+			script{
+				echo 'This will run only if successful'
+				productPackage.updateBuild(ARProject_Prefix,'b'+env.BUILD_NUMBER)
+				productPackage.triggerOtherJobWithJobName(ARProject_Prefix,'b'+env.BUILD_NUMBER,'download_from_s3')
+			}
+        }
+        failure {
+            echo 'This will run only if failed'
+        }
+        unstable {
+            echo 'This will run only if the run was marked as unstable'
+        }
+        changed {
+            echo 'This will run only if the state of the Pipeline has changed'
+            echo 'For example, if the Pipeline was previously failing but is now successful'
+        }
+    }
+}
+
+String getprojectFolder(jobName){
+	return jobName[0..jobName.indexOf("_")-1]
+}

@@ -1,6 +1,22 @@
 #!groovy
+@Library('pipeline-libs') 
+
+stage('setup'){
+    node{
+        loadLocalSteps()
+    }
+}
+private void loadLocalSteps(){
+    library identifier: 'ci-script@awsTest', 
+            retriever: modernSCM([
+                $class: 'GitSCMSource', 
+                credentialsId: '46afdff1-cdd3-4098-b8af-d904b4d298aa', 
+                id: 'a58b1061-f557-46f6-ba36-b53cfdb77d43', 
+                remote: 'ssh://git@bitbucket.lombardrisk.com:7999/cprod/ci-script.git', 
+                traits: [[$class: 'BranchDiscoveryTrait']]])
+}
 pipeline{
-    agent { label 'PRODUCT-CI-TEST' }
+    agent { label 'PRODUCT-CI-SHA-LOCAL1' }
     stages{
         stage("parallel test"){
             steps{
@@ -93,13 +109,19 @@ def getValidFolders(folders){
     return allFolders
 }
 
+def copyScripts(propertiesSet){
+	def app_hostuser=propertiesSet['app.user']+'@'+propertiesSet['app.host']
+	def downloadPath='/home/'+propertiesSet['app.user']+'/'
+	sh( returnStatus: true, script: '''scp scripts/Remote*.sh '''+app_hostuser+''':'''+downloadPath)
+	sh(returnStdout: true, script: '''ssh '''+app_hostuser+''' 'chmod u+x Remote*.sh ' ''')
+}
 def installersJson(projectFolder,deployFolder){
 	
     def jsonFileName='deployment.json'
     def propertiesFileName='env.properties'
 	def files=findFiles(glob: '**/'+projectFolder+'/**/'+deployFolder+'/'+jsonFileName)
     def propertiesFiles=findFiles(glob: '**/'+projectFolder+'/**/'+deployFolder+'/'+propertiesFileName)
-    
+    def propertiesSet=readProperties file: propertiesFiles[0]
 	def gado
 	def installers
 	def installOcelotPath
@@ -107,15 +129,16 @@ def installersJson(projectFolder,deployFolder){
 	gado=readJSON file: files[0].path
 		installers=gado.installers
 		if(installers){
+			copyScripts(propertiesSet)
 			createDisplayHeadline('Install Ocelot and Products','3')
 			for(int i=0;i<installers.size();i++){
 				installPrefix=installers[i].prefix
 				
                 if(installPrefix.equalsIgnoreCase('AgileREPORTER')){
 					installers[i].prefix='AgileREPORTER'
-					findAROcelot(installers[i],projectFolder,propertiesFiles[0])
+					findAROcelot(installers[i],projectFolder,propertiesSet)
 				}else{
-					findARProduct(installers[i],projectFolder,propertiesFiles[0])
+					findARProduct(installers[i],projectFolder,propertiesSet)
 				}
 					
 			}
@@ -125,71 +148,25 @@ def installersJson(projectFolder,deployFolder){
 	
 }
 
-def getInstallerMainVersion(installVer){
-    if(installVer==null || installVer.equalsIgnoreCase('LATEST')){
-        installVer=''
-    }else{
-        if(installVer.contains('-b')){
-            installVer=installVer[0..installVer.indexOf('-b')-1]
-        }
-		if(installVer.toUpperCase().contains('-SNAPSHOT')){
-			installVer=installVer[0..installVer.indexOf('-SNAPSHOT')-1]
-		}
-    }
-    return installVer
-}
 
-def getInstallerBuildNumber(installVer){
-    def buildNumber
-    if(installVer!=null && !installVer.equals('')){
-		if(installVer.contains('-b')){
-            buildNumber=installVer[installVer.indexOf('b')..-1]
-        }
-		if(installVer.toUpperCase().contains('-SNAPSHOT')){
-			buildNumber='SNAPSHOT'
-		}
-    }
-    return buildNumber
-}
 
-def getInstallerRealBuildNumber(downloadFileName,buildNumber){
-    if(downloadFileName){
-		if(buildNumber.indexOf('-b')!=-1){
-			buildNumber=downloadFileName[downloadFileName.indexOf('b')..-5]
-		}
-        if(buildNumber.indexOf('-SNAPSHOT')!=-1){
-			buildNumber='SNAPSHOT'
-		}
-	    if(buildNumber.indexOf('_sign')!=-1){
-		    buildNumber=buildNumber[0..buildNumber.indexOf('_sign')-1]
-	    }
-    }
-    return buildNumber
-}
-def getFileName(downloadFileFullName){
-	def downloadFileName
-	if(downloadFileFullName && downloadFileFullName.contains('/')){
-		downloadFileName=downloadFileFullName[downloadFileFullName.lastIndexOf('/')+1]
-	}
-	return downloadFileName
-}
-def findAROcelot(ocelotInstaller,projectFolder,propertiesFileFullName){
+def findAROcelot(ocelotInstaller,projectFolder,propertiesSet){
     def installVer=ocelotInstaller.version
 	createDisplayHeadline(' * ['+ocelotInstaller.prefix+', '+installVer+']','4')
 	createDisplayStartOl()
     if(!ocelotInstaller.needInstall || !ocelotInstaller.needInstall.equalsIgnoreCase("no")){
 		echo 'install '+ocelotInstaller.prefix+'...'
-        def downloadFileFullName=searchLatestOcelot(propertiesFileFullName,ocelotInstaller.prefix,getInstallerMainVersion(installVer),getInstallerBuildNumber(installVer))
-		def downloadFileName=getFileName(downloadFileFullName)
+        def downloadFileFullName=searchInstaller.searchLatestOcelot(propertiesSet,ocelotInstaller.prefix,helper.getInstallerMainVersion(installVer),helper.getInstallerBuildNumber(installVer))
+		def downloadFileName=helper.getFileName(downloadFileFullName)
 		if(downloadFileName){
 			//InstallerCheck and installOcelot
-			def flag=remoteInstallercheck(propertiesFileFullName,downloadFileName)
+			def flag=searchInstaller.remoteInstallercheck(propertiesSet,downloadFileName)
 			if(flag==0){
 				createDisplayStepline('install ocelot: '+downloadFileName)
 				def props=ocelotInstaller.props
 				if(props){
 					echo props[0].filename
-					opAROcelot(projectFolder,propertiesFileFullName,downloadFileFullName,downloadFileName,props[0].filename)
+					opAROcelot(projectFolder,propertiesSet,downloadFileFullName,downloadFileName,props[0].filename)
 				}
 			}else{
 				echo "no need to install ["+ocelotInstaller.prefix+", "+installVer+" ]"
@@ -207,23 +184,23 @@ def findAROcelot(ocelotInstaller,projectFolder,propertiesFileFullName){
 	createDisplayEndOl()
 }
 
-def findARProduct(productInstaller,projectFolder,propertiesFileFullName){
+def findARProduct(productInstaller,projectFolder,propertiesSet){
     def installVer=productInstaller.version
-    def buildNumber=getInstallerBuildNumber(installVer)
+    def buildNumber=helper.getInstallerBuildNumber(installVer)
 	def downloadFileFullName
     def downloadFileName
 	createDisplayHeadline(' * ['+productInstaller.prefix+', '+installVer+']','4')
 	createDisplayStartOl()
     if(!productInstaller.needInstall || !productInstaller.needInstall.equalsIgnoreCase("no")){
 		echo 'install Product '+productInstaller.prefix+'...'
-		installVer=getInstallerMainVersion(installVer)
-        downloadFileFullName=searchLatestProduct(projectFolder,propertiesFileFullName,productInstaller.prefix.toUpperCase(),installVer,buildNumber)
-		downloadFileName=getFileName(downloadFileFullName)
+		installVer=helper.getInstallerMainVersion(installVer)
+        downloadFileFullName=searchInstaller.searchLatestProduct(projectFolder,propertiesSet,productInstaller.prefix.toUpperCase(),installVer,buildNumber)
+		downloadFileName=helper.getFileName(downloadFileFullName)
 		if(downloadFileName){
-			def flag=remoteInstallercheck(propertiesFileFullName,downloadFileName)
+			def flag=searchInstaller.remoteInstallercheck(propertiesSet,downloadFileName)
 			if(flag==0){
 				createDisplayStepline('install product: '+downloadFileName)
-				installARProduct(projectFolder,propertiesFileFullName,downloadFileFullName,downloadFileName)
+				installARProduct(projectFolder,propertiesSet,downloadFileFullName,downloadFileName)
 			}else{
 				echo "no need to install product ["+productInstaller.prefix+", "+installVer+" ]"
 				createDisplayStepline('install product: no need, skip')
@@ -239,7 +216,7 @@ def findARProduct(productInstaller,projectFolder,propertiesFileFullName){
 		createDisplayStepline('install product: no need, skip')
 	}
     
-    buildNumber=getInstallerRealBuildNumber(downloadFileName,buildNumber)
+    buildNumber=helper.getInstallerRealBuildNumber(downloadFileName,buildNumber)
     def props=productInstaller.props
 	if(props){
 		for(int j=0;j<props.size();j++){
@@ -254,7 +231,7 @@ def findARProduct(productInstaller,projectFolder,propertiesFileFullName){
 					createDisplayStepline('config '+props[j])
 					eaFlag='2'
                 }
-				linkARprojectDID(projectFolder,propertiesFileFullName,productInstaller.prefix,installVer+'-'+buildNumber,props[j].filename,props[j].aliases,eaFlag)
+				linkARprojectDID(projectFolder,propertiesSet,productInstaller.prefix,installVer+'-'+buildNumber,props[j].filename,props[j].aliases,eaFlag)
             }else{
                 echo "no need to config ${props[j]}"
 				createDisplayStepline('config '+props[j]+': no need, skip')
@@ -266,157 +243,7 @@ def findARProduct(productInstaller,projectFolder,propertiesFileFullName){
 						
 }
 
-/**search installer from s3
-* @s3repo: test.properties, get property s3.bucket, local.linux from it
-* @projectFolder like hkma, mas
-* @propertiesFileFullName: test.properties, get property s3.bucket, local.linux from it
-* @productPrefixAndVersion like CE_DPB_v1.0.0-b9_sign.lrm's CE_DPB_v1.0.0
-* @buildNumber: like CE_DPB_v1.0.0-b9_sign.lrm's b9
-* @productSuffix: .lrm .jar
-*/
-String searchLatestFromS3(s3repo,propertiesFileFullName,productPrefixAndVersion,buildNumber,productSuffix){
-	def downloadFileName
-	def downfiles
-	def s3_bucket=getSomeProperties(propertiesFileFullName,'s3.bucket')
-	withAWS(credentials: 'aws') {
-		if(buildNumber){
-			downfiles=s3FindFiles(bucket:s3_bucket, path:s3repo, glob:"**/${productPrefixAndVersion}*${buildNumber}*${productSuffix}")
-		}else{
-			downfiles=s3FindFiles(bucket:s3_bucket, path:s3repo, glob:"**/${productPrefixAndVersion}*${productSuffix}")
-		}
-		
-    }
-	if(downfiles){
-		//downfiles.each{print "${it.name},${it.path},${it.length},${it.lastModified}"}
-		def lastIndex=0
-		def lastBuildNumber=downfiles[0].lastModified
-		downloadFileName=downfiles[0].name
-		for(int index=0;index<downfiles.size();index++){
-			if(lastBuildNumber<downfiles[index].lastModified){
-				lastBuildNumber=downfiles[index].lastModified
-				lastIndex=index
-				downloadFileName=downfiles[index].name
-			}
-		}
-	}
-	echo "Latest installer name "+downloadFileName
-	return downloadFileName
-}
-String searchLatestProduct(projectFolder,propertiesFileFullName,productPrefix,productVersion,buildNumber){
-	def downloadFromLocalServer=getSomeProperties(propertiesFileFullName,'default.use.repo')
-	def downloadFileName
-	def repo
-	if(!downloadFromLocalServer || downloadFromLocalServer.equalsIgnoreCase('local')){
-		repo=getSomeProperties(propertiesFileFullName,'product.local.repo')
-		downloadFileName=searchLatestFromLocal(repo,propertiesFileFullName,productPrefix+'_v'+productVersion,buildNumber,'.lrm')
-	}else{
-		repo='arproduct/'+projectFolder+'/CandidateReleases/'
-		downloadFileName=searchLatestFromS3(repo,propertiesFileFullName,productPrefix+'_v'+productVersion,buildNumber,'.lrm')
-		if(!downloadFileName){
-			repo='arproduct/'+productPrefix.toLowerCase()+'/CandidateReleases/'
-			downloadFileName=searchLatestFromS3(repo,propertiesFileFullName,productPrefix+'_v'+productVersion,buildNumber,'.lrm')
-		}
-	}
-	
-	return downloadFileName
-}
 
-String searchLatestOcelot(propertiesFileFullName,productPrefix,productVersion,buildNumber){
-	def downloadFromLocalServer=getSomeProperties(propertiesFileFullName,'default.use.repo')
-	def downloadFileName
-	def repo
-	if(!downloadFromLocalServer || downloadFromLocalServer.equalsIgnoreCase('local')){
-		repo=getSomeProperties(propertiesFileFullName,'ar.local.repo')
-		downloadFileName=searchLatestFromLocal(repo,propertiesFileFullName,productPrefix+'-'+productVersion,buildNumber,'.jar')
-	}else{
-		repo='AgileREPORTER/Releases/CandidateReleases/'
-		downloadFileName=searchLatestFromS3(repo,propertiesFileFullName,productPrefix+'-'+productVersion,buildNumber,'.jar')
-	}
-	
-	return downloadFileName
-}
-
-String searchLatestFromLocal(localRepo,propertiesFileFullName,productPrefixAndVersion,buildNumber,productSuffix){
-	def local_linux=getSomeProperties(propertiesFileFullName,'app.host')
-	def app_user=getSomeProperties(propertiesFileFullName,'app.user')
-	def app_hostuser=app_user+'@'+local_linux
-	def searchContent
-	if(buildNumber){
-		searchContent=productPrefixAndVersion+'*'+buildNumber+'*'+productSuffix
-	}else{
-		searchContent=productPrefixAndVersion+'*'+productSuffix
-	}
-	def flag=sh( returnStdout: true, script: '''ssh '''+app_hostuser+'''  'find '''+localRepo+''' -iname '''+searchContent+''' -print0|xargs -0 stat -c'%Y:%n'|sort -nr|cut -d ':' -f 2|head -n 1' ''')
-    return flag
-}
-/**download installer from s3
-* @s3repo: test.properties, get property s3.bucket, local.linux from it
-* @projectFolder like hkma, mas
-* @propertiesFileFullName: test.properties, get property s3.bucket, local.linux from it
-* @downloadFileName like CE_DPB_v1.0.0-b9_sign.lrm under <projectFolder>/candidate-release/<productVersionFolder>/
-* @downloadPath: local path, download in local.linux
-*/
-void downloadFromS3(s3repo,propertiesFileFullName,downloadFileName,downloadPath){
-	def downfiles
-	def local_linux=getSomeProperties(propertiesFileFullName,'app.host')
-	def app_user=getSomeProperties(propertiesFileFullName,'app.user')
-	def app_hostuser=app_user+'@'+local_linux
-	def s3_bucket=getSomeProperties(propertiesFileFullName,'s3.bucket')
-	withAWS(credentials: 'aws') {
-		downfiles=s3FindFiles(bucket:s3_bucket, path:s3repo, glob:"**/${downloadFileName}")
-        //downfiles.each{print "${it.name},${it.path},${it.length},${it.lastModified}"}
-    }
-    if(downfiles){
-		def lastIndex=0
-		withAWS(credentials: 'aws') {
-            s3Download(bucket:s3_bucket, path:s3repo+downfiles[lastIndex].path,file:downfiles[lastIndex].path,force:true)
-        }
-        def status=sh( returnStatus: true, script: 'scp '+downfiles[lastIndex].path+' '+app_hostuser+':'+downloadPath)
-        echo "downloaded Agile Reporter Product completely."
-		
-    }else{
-	    error "there is no packages existed in bucket server, name like ${downloadFileName}"
-	}
-	
-}
-
-void downloadOcelot(propertiesFileFullName,downloadFileName,downloadPath){
-	def s3_ar_repo='AgileREPORTER/Releases/CandidateReleases/'
-    downloadFromS3(s3_ar_repo,propertiesFileFullName,downloadFileName,downloadPath)
-}
-
-void downloadARProduct(projectFolder,propertiesFileFullName,downloadFileName,downloadPath){
-	def s3_ar_repo='arproduct/'+projectFolder+'/CandidateReleases/'
-    downloadFromS3(s3_ar_repo,propertiesFileFullName,downloadFileName,downloadPath)
-}
-
-
-String getSomeProperties(propFile,keystr){
-	def files =findFiles(glob: '**/'+propFile)
-	def returnValue=''
-	def props
-	for(int index=0;index<files.size();index++){
-		props = readProperties interpolate: true, file: files[index].path
-		props.each{
-			if(it.key==keystr){
-				//println(it.key + " = " + it.value)
-				returnValue=it.value
-				return returnValue
-			}
-		}
-	}
-	return returnValue
-}
-
-int remoteInstallercheck(propertiesFileFullName,installerName){
-    def ocelotPath=getSomeProperties(propertiesFileFullName,'app.install.path')
-	def local_linux=getSomeProperties(propertiesFileFullName,'app.host')
-	def app_user=getSomeProperties(propertiesFileFullName,'app.user')
-	def app_hostuser=app_user+'@'+local_linux
-	
-	def flag=sh( returnStatus: true, script: '''ssh '''+app_hostuser+'''  'sh RemoteProductInstallerCheck.sh '''+ocelotPath+''' '''+installerName+''' ' ''')
-    return flag
-} 
 
 /***
 *install arproduct packages part, if RemoteInstall_0.tmp contains fail, it will terminate.
@@ -426,13 +253,13 @@ int remoteInstallercheck(propertiesFileFullName,installerName){
 * @downloadFromLocalServer: null means download from remote
 * @ocelotPath: install path
 */
-void installARProduct(projectFolder,propertiesFileFullName,installerFullName,installerName){
-	def local_linux=getSomeProperties(propertiesFileFullName,'app.host')
-	def app_user=getSomeProperties(propertiesFileFullName,'app.user')
+void installARProduct(projectFolder,propertiesSet,installerFullName,installerName){
+	def local_linux=propertiesSet['app.host']
+	def app_user=propertiesSet['app.user']
 	
 	def stepInfo='download product package'
 	def app_hostuser=app_user+'@'+local_linux
-	def ocelotPath=getSomeProperties(propertiesFileFullName,'app.install.path')
+	def ocelotPath=propertiesSet['app.install.path']
 	def downloadPath=ocelotPath+'/deploys/'
 
 	//create download folder deploys
@@ -442,7 +269,7 @@ void installARProduct(projectFolder,propertiesFileFullName,installerFullName,ins
 		createDisplayStepline(stepInfo+' from local')
 	}else{
 		createDisplayStepline(stepInfo+' from remote')
-		downloadARProduct(projectFolder,propertiesFileFullName,installerName,downloadPath)
+		downloadInstaller.downloadARProduct(projectFolder,propertiesSet,installerName,downloadPath)
 		installerFullName=downloadPath+installerName
 	}
 	sh( returnStatus: true, script: '''ssh '''+app_hostuser+'''  'sh RemoteInstall.sh -help' ''')
@@ -459,6 +286,8 @@ void installARProduct(projectFolder,propertiesFileFullName,installerFullName,ins
 	}
 }
 
+
+
 /***
 *config DID part, arguments: projectName, productPrefix, DID's properties's name suffix like 'aliasinfo.properties' 
 * @projectFolder like hkma, mas
@@ -469,12 +298,12 @@ void installARProduct(projectFolder,propertiesFileFullName,installerFullName,ins
 * @productPropAliases: like "STB Work:STB System:STB System HKMA"
 * @eaFlag: 1 means config argument is -ea, 2 means config argument is -da and -aa
 */
-def linkARprojectDID(projectFolder,propertiesFileFullName,productPrefix,productVersion,productPropFileName,productPropAliases,eaFlag){
+def linkARprojectDID(projectFolder,propertiesSet,productPrefix,productVersion,productPropFileName,productPropAliases,eaFlag){
 	def continue_status1='RemoteInstall_'+eaFlag+'.tmp'
-	def local_linux=getSomeProperties(propertiesFileFullName,'app.host')
-	def app_user=getSomeProperties(propertiesFileFullName,'app.user')
+	def local_linux=propertiesSet['app.host']
+	def app_user=propertiesSet['app.user']
 	def app_hostuser=app_user+'@'+local_linux
-	def ocelotPath=getSomeProperties(propertiesFileFullName,'app.install.path')
+	def ocelotPath=propertiesSet['app.install.path']
 	def downloadPath=ocelotPath+'/bin/'
 	
 	//copy aliasinfo.properties to local ocelot folder
@@ -502,24 +331,6 @@ def linkARprojectDID(projectFolder,propertiesFileFullName,productPrefix,productV
 }
 
 
-String getAROcelotProperty(propFile,keystr){
-	def files =findFiles(glob: '**/'+propFile)
-	def returnValue=''
-	def props
-	for(int index=0;index<files.size();index++){
-		props = readProperties interpolate: true, file: files[index].path
-		props.each{
-			if(it.key==keystr){
-				println(it.key + " = " + it.value)
-				returnValue=it.value
-				return returnValue
-			}
-		}
-	}
-	return returnValue
-}
-
-
 /***
 *new install or upgrade ar platform part, use @ocelotPropFileName ocelot.user.password= to judged new install or upgrade
 * @projectFolder like hkma, mas
@@ -527,27 +338,26 @@ String getAROcelotProperty(propFile,keystr){
 * @installerName: like AgileREPORTER-19.3.0-b207.jar
 * @ocelotPropFileName: ocelot properties's name like 'hkma_upgrade_ocelot.properties' 'hkma_new_ocelot.properties'
 */
-void opAROcelot(projectFolder,propertiesFileFullName,installerFullName,installerName,ocelotPropFileName){
-	def local_linux=getSomeProperties(propertiesFileFullName,'app.host')
-	def app_user=getSomeProperties(propertiesFileFullName,'app.user')
+void opAROcelot(projectFolder,propertiesSet,installerFullName,installerName,ocelotPropFileName){
+	def local_linux=propertiesSet['app.host']
+	def app_user=propertiesSet['app.user']
 
 	def app_hostuser=app_user+'@'+local_linux
-	def ocelotPath=getSomeProperties(propertiesFileFullName,'app.install.path')
+	def ocelotPath=propertiesSet['app.install.path']
 	def downloadPath=ocelotPath+'/deploys/'
 
 	//transfer ocelot properties to workspace for getting properties
 	def ocelotPropFilePath=env.WORKSPACE+'/'+projectFolder+'/src/main/resources/properties/'
-	def ocleot_user_password=getAROcelotProperty(ocelotPropFilePath+ocelotPropFileName,'ocelot.user.password')
+	def ocelotProps=readProperties file: ocelotPropFilePath+ocelotPropFileName
+	def ocleot_user_password=ocelotProps['ocelot.user.password']
 	//def ocelotPath=getAROcelotProperty(ocelotPropFileName,'ocelot.install.path')
 	sh( returnStatus: true, script: '''ssh '''+app_hostuser+'''  'mkdir '''+downloadPath+''' 2>/dev/null ' ''')
 	if(ocleot_user_password){
 		createDisplayStepline('new install')
 		echo "new install agile reporter platform"
-		def dbserver_user=getSomeProperties(propertiesFileFullName,'database.user')
-		def dbserver_host=getSomeProperties(propertiesFileFullName,'database.host')
-		def dbserver_hostuser=dbserver_user+'@'+dbserver_host
-		def local_dbname=getAROcelotProperty(ocelotPropFilePath+ocelotPropFileName,'ocelot.jdbc.username')
-		def local_dbinstance=getAROcelotProperty(ocelotPropFilePath+ocelotPropFileName,'ocelot.jdbc.url')
+		def dbserver_hostuser=propertiesSet['database.user']+'@'+propertiesSet['database.host']
+		def local_dbname=ocelotProps['ocelot.jdbc.username']
+		def local_dbinstance=ocelotProps['ocelot.jdbc.url']
 		def jdbcurlarr=local_dbinstance.split(':')
 		local_dbinstance=jdbcurlarr[-1]
 		echo "create oracle database"
@@ -575,7 +385,7 @@ void opAROcelot(projectFolder,propertiesFileFullName,installerFullName,installer
 		}else{
 			//download from remote server
 			createDisplayStepline(stepInfo+'from remote')
-			downloadOcelot(propertiesFileFullName,installerName,downloadPath)
+			downloadInstaller.downloadOcelot(propertiesSet,installerName,downloadPath)
 			installerFullName=downloadPath+installerName
 		}
 		sh( returnStatus: true, script: '''ssh '''+app_hostuser+'''  'sh RemoteInstall.sh -help' ''')
